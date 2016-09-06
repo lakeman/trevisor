@@ -1,0 +1,14 @@
+*.o
+*.d
+*.a
+*.bin
+*.bin.s
+.depends
+.flags
+.objects
+.config
+.config.bak
+bitvisor.map
+defconfig
+process/.boptions
+bitvisor.elf
