@@ -936,6 +936,49 @@ ret:
 		return 0;
 }
 
+static ulong 
+sys_getdbreg (ulong ip, ulong sp, ulong num, ulong si, ulong di)
+{
+#ifdef TRESOR_DEBUG
+        u64 reg;
+   printf("Entering sys_getdbreg\n");
+   if (currentcpu_available ())
+                printf ("CPU%d  ", currentcpu->cpunum);
+
+   if (si == 0) {
+       asm("movq %%db0, %%rax;"
+           "movq %%rax, %0;"
+           :"=r"(reg));
+       printf("DB0 has value: %08llX\n", reg);
+       return reg;
+   } else if (si ==1) {
+       asm("movq %%db1, %%rax;"
+           "movq %%rax, %0;"
+           :"=r"(reg));
+       printf("DB1 has value: %08llX\n", reg);
+       return reg;
+   } else if (si ==2) {
+       asm("movq %%db2, %%rax;"
+           "movq %%rax, %0;"
+           :"=r"(reg));
+       printf("DB2 has value: %08llX\n", reg);
+       return reg;
+   } else if (si ==3) {
+       asm("movq %%db3, %%rax;"
+           "movq %%rax, %0;"
+           :"=r"(reg));
+       printf("DB3 has value: %08llX\n", reg);
+       return reg;
+   }
+   
+   return -1;
+#else
+   return 0;
+#endif
+}
+
+
+
 static syscall_func_t syscall_table[NUM_OF_SYSCALLS] = {
 	NULL,			/* 0 */
 	sys_nop,
@@ -952,6 +995,7 @@ static syscall_func_t syscall_table[NUM_OF_SYSCALLS] = {
 	sys_msgunregister,
 	sys_exitprocess,
 	sys_restrict,
+    sys_getdbreg,       /* 15 */
 };
 
 __attribute__ ((regparm (1))) void

@@ -43,6 +43,7 @@
 #include "reboot.h"
 #include "string.h"
 #include "thread.h"
+#include "tresor.h"
 #include "vmmcall.h"
 #include "vmmcall_status.h"
 #include "vt.h"
@@ -105,6 +106,35 @@ do_mov_cr (void)
 	}
 	add_ip ();
 }
+
+#ifdef TRESOR
+/* 
+   Hypvervisor handler called when the guest 
+   attempts to access the debug registers.
+   Creates virtual debug registers in main memory
+   and redirects the access to them.
+   Guest does not have hardware breakpoint support anymore.
+*/
+static void
+do_handle_mov_dr(void) 
+{
+   printf("Access on Debug registers\n");
+   static ulong regs[8];
+   union {
+       struct exit_qual_dr s;
+       ulong v;
+   } eqc;
+
+   asm_vmread (VMCS_EXIT_QUALIFICATION, &eqc.v);
+   if (eqc.s.dir == 0) { // MOV TO DR
+       vt_read_general_reg (eqc.s.reg, &regs[eqc.s.num]);
+   } else { // MOV FROM DR
+       vt_write_general_reg (eqc.s.reg, regs[eqc.s.num]);
+   }
+   add_ip();
+}
+#endif
+
 
 static void
 do_cpuid (void)
@@ -775,6 +805,11 @@ vt__exit_reason (void)
 	case EXIT_REASON_XSETBV:
 		do_xsetbv ();
 		break;
+#ifdef TRESOR
+   case EXIT_REASON_MOV_DR:
+       do_handle_mov_dr();
+       break;
+#endif
 	case EXIT_REASON_EPT_VIOLATION:
 		do_ept_violation ();
 		break;
@@ -879,7 +914,12 @@ vt_mainloop (void)
 	u64 efer;
 
 	for (;;) {
-		schedule ();
+#ifdef TRESOR
+            if (currentcpu->cpunum != 0)
+                tresor_init_ap();
+#endif
+		
+        schedule ();
 		vt_vmptrld (current->u.vt.vi.vmcs_region_phys);
 		panic_test ();
 		if (current->halt) {

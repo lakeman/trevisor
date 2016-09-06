@@ -183,7 +183,11 @@ entry16_2:
 	or	$MSR_IA32_EFER_LME_BIT,%eax
 	wrmsr
 	mov	%cr0,%eax
-	or	$(CR0_PG_BIT|CR0_TS_BIT|CR0_PE_BIT),%eax
+.ifdef TRESOR
+    or  $(CR0_PG_BIT|CR0_PE_BIT),%eax 
+.else
+    or  $(CR0_PG_BIT|CR0_TS_BIT|CR0_PE_BIT),%eax 
+.endif
 	mov	%eax,%cr0
 	ljmpl	$ENTRY_SEL_CODE64,$callmain64
 init32:

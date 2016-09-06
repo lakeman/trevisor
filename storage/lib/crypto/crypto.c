@@ -67,4 +67,8 @@ crypto_init (void)
 	crypto_list = NULL;
 	aes_xts_init ();
 	crypto_none_init ();
+#ifdef TRESOR
+    crypto_tresor_init();
+#endif
+
 }

@@ -48,6 +48,10 @@ do_cpuid_pass (u32 ia, u32 ic, u32 *oa, u32 *ob, u32 *oc, u32 *od)
 		*oc &= ~CPUID_1_ECX_VMX_BIT;
 		/* *od &= ~CPUID_1_EDX_PAE_BIT; */
 		/* *od &= ~CPUID_1_EDX_APIC_BIT; */
+#ifdef TRESOR
+        /* disable debugging support */
+        /* *od &= ~CPUID_1_EDX_DE_BIT; */
+#endif
 	} else if (tmpa >= 4 && ia == 4) {
 		/* *oa &= ~CPUID_4_EAX_NUMOFTHREADS_MASK; */
 		/* *oa &= ~CPUID_4_EAX_NUMOFCORES_MASK; */

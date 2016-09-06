@@ -29,6 +29,7 @@
 
 #include "asm.h"
 #include "assert.h"
+#include "ap.h"
 #include "config.h"
 #include "current.h"
 #include "initfunc.h"
@@ -38,6 +39,7 @@
 #include "pcpu.h"
 #include "printf.h"
 #include "string.h"
+#include "tresor.h"
 #include "vmmcall.h"
 #include "vmmcall_boot.h"
 #include "../crypto/decryptcfg.h"
@@ -99,14 +101,28 @@ boot_guest (void)
 	current->vmctl.read_general_reg (GENERAL_REG_RBX, &rbx);
 	rbx &= 0xFFFFFFFF;
 	if (rbx) {
-		d = mapmem_hphys (rbx, sizeof *d, 0);
+#ifdef TRESOR
+        d = mapmem_hphys (rbx, sizeof *d, 1);
+#else  
+        d = mapmem_hphys (rbx, sizeof *d, 0);
+#endif
 		ASSERT (d);
 		if (d->len != sizeof *d)
 			panic ("config size mismatch: %d, %d\n", d->len,
 			       (int)sizeof *d);
 		memcpy (&config, d, sizeof *d);
+#ifdef TRESOR
+       // erase the config in the guest!
+       unsigned char *tmp = (unsigned char*) d;
+       unsigned int i;
+       for (i=0; i<sizeof *d; i++)
+           tmp[i] = 0;
+#endif
 		unmapmem (d, sizeof *d);
 	}
+#ifdef TRESOR
+   tresor_init_bsp();
+#endif
 	wait_for_boot_continue ();
 }
 
@@ -158,6 +174,50 @@ loadcfg (void)
 	free (tmpbuf);
 }
 
+void showPCR(void)
+{
+#ifdef TCG_BIOS
+#define TPM_DIGEST_SIZE 20
+#define PCR_BLOCK 5*(TPM_DIGEST_SIZE*2+1)
+   printf("VMMCALL showPCR\n");
+   u8 *d;  
+   ulong rbx;
+   u8 pcr[TPM_DIGEST_SIZE];
+   char tostr[PCR_BLOCK];
+   u32 i;
+
+
+   getPCR(0, pcr);
+   for (i=0; i<20; i++)
+       snprintf(&tostr[i*2],3, "%02hhx", pcr[i] );
+   getPCR(1, pcr);
+   for (i=0; i<20; i++)
+       snprintf(&tostr[41+i*2],3, "%02hhx", pcr[i]);
+   getPCR(2, pcr);
+   for (i=0; i<20; i++)
+       snprintf(&tostr[82+i*2],3, "%02hhx", pcr[i]);
+   getPCR(3, pcr);
+   for (i=0; i<20; i++)
+       snprintf(&tostr[123+i*2],3, "%02hhx", pcr[i]);
+   getPCR(4, pcr);
+   for (i=0; i<20; i++)
+       snprintf(&tostr[164+i*2],3, "%02hhx", pcr[i]);
+
+
+   if (currentcpu->cpunum != 0)
+       panic ("boot from AP");
+
+   current->vmctl.read_general_reg (GENERAL_REG_RBX, &rbx);
+   rbx &= 0xFFFFFFFF;
+
+   if (rbx) {
+       d = mapmem_hphys (rbx, PCR_BLOCK, 1);
+       memcpy (d, tostr, PCR_BLOCK);
+       unmapmem (d, PCR_BLOCK);
+   }
+#endif
+}
+
 void
 vmmcall_boot_enable (void (*func) (void *), void *arg)
 {
@@ -176,6 +236,7 @@ vmmcall_boot_init (void)
 {
 	vmmcall_register ("boot", boot_guest);
 	vmmcall_register ("loadcfg", loadcfg);
+    vmmcall_register ("showPCR", showPCR);
 	config.len = 0;
 	enable = false;
 }

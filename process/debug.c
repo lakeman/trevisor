@@ -33,6 +33,8 @@
 #include <lib_string.h>
 #include <lib_syscalls.h>
 
+#define TRESOR_DEBUG
+
 enum memdump_type {
 	MEMDUMP_GPHYS,
 	MEMDUMP_HVIRT,
@@ -336,6 +338,13 @@ guestreg (char *buf)
 	if (buf[1] == '\0') {
 		for (pp = l; pp->fmt; pp++)
 			printf (pp->fmt, pp->name, *pp->data);
+#ifdef TRESOR_DEBUG
+            int i;
+            for (i=0; i<4; i++) {
+                u64 r = getdbreg(i);
+                printf("DB%d %08llX ", i, r);
+            }
+#endif
 	} else {
 		buf++;
 		buf = skip_space (buf);

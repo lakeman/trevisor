@@ -165,6 +165,10 @@ svm_vmcb_init (void)
 	((u8 *)current->u.svm.msr.msrbmp)[0x1008] &= ~2;
 	p = current->u.svm.vi.vmcb;
 	memset (p, 0, PAGESIZE);
+#ifdef TRESOR
+    p->intercept_read_dr = 0xff;
+    p->intercept_write_dr = 0xff;
+#endif
 	p->intercept_read_cr = ~0x104;
 	p->intercept_write_cr = ~0x104;
 	p->intercept_exception = 0x4000;

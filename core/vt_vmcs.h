@@ -49,6 +49,11 @@ enum exit_qual_io_dir {
 	EXIT_QUAL_IO_DIR_IN = 1,
 };
 
+enum exit_qual_dr_dir {
+   EXIT_QUAL_DR_TO_DR = 0,
+   EXIT_QUAL_DR_FROM_DR = 1,
+};
+
 enum exit_qual_io_op {
 	EXIT_QUAL_IO_OP_DX = 0,
 	EXIT_QUAL_IO_OP_IMMEDIATE = 1,
@@ -105,6 +110,15 @@ struct exit_qual_cr {
 	unsigned int reserved2 : 4;
 	unsigned int lmsw_src : 16;
 } __attribute__ ((packed));
+
+struct exit_qual_dr {
+   enum db_reg num : 3;
+   unsigned int  reserved: 1;
+   enum exit_qual_dr_dir dir: 1;
+   unsigned int  reserved2: 3;
+   enum general_reg reg : 4;
+} __attribute__ ((packed));
+
 
 struct exit_qual_io {
 	enum exit_qual_io_size size : 3;

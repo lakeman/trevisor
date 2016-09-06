@@ -40,6 +40,7 @@
 #include "sleep.h"
 #include "spinlock.h"
 #include "string.h"
+#include "tresor.h"
 #include "wakeup_entry.h"
 
 static unsigned int wakeup_cpucount;
@@ -185,6 +186,9 @@ wakeup_cont (void)
 	asm_wrcr3 (currentcpu->cr3);
 	call_initfunc ("wakeup");
 	if (!currentcpu->cpunum) {
+#ifdef TRESOR
+        tresor_wakeup();
+#endif
 		call_initfunc ("resume");
 		rw_spinlock_init (&wakeup_wait_lock);
 		rw_spinlock_lock_ex (&wakeup_wait_lock);

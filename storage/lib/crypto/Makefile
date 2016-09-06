@@ -2,7 +2,8 @@ CONSTANTS-$(CONFIG_ENABLE_ASSERT) += -DENABLE_ASSERT
 CONSTANTS-$(CONFIG_STORAGE_PD) += -DSTORAGE_PD
 CONSTANTS-$(CONFIG_ENABLE_ASSERT) += -DENABLE_ASSERT
 CONSTANTS-$(CONFIG_SELECT_AES_GLADMAN) += -DAES_GLADMAN
+CONSTANTS-$(CONFIG_TRESOR) += -DTRESOR
 
 CFLAGS += -Icrypto -Icrypto/openssl-$(OPENSSL_VERSION)/include
 
-objs-1 += aes_xts.o crypto.o none.o
+objs-1 += aes_xts.o crypto.o none.o tresor.o tresor_asm.o

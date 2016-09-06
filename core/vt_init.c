@@ -308,6 +308,9 @@ vt__vmcs_init (void)
 		      VMCS_PROC_BASED_VMEXEC_CTL_INVLPGEXIT_BIT |
 		      VMCS_PROC_BASED_VMEXEC_CTL_UNCONDIOEXIT_BIT |
 		      VMCS_PROC_BASED_VMEXEC_CTL_USETSCOFF_BIT |
+#ifdef TRESOR
+              VMCS_PROC_BASED_VMEXEC_CTL_MOVDREXIT_BIT | 
+#endif
 		      (procbased_ctls2_and ?
 		       VMCS_PROC_BASED_VMEXEC_CTL_ACTIVATECTLS2_BIT : 0) |
 		      procbased_ctls_or) & procbased_ctls_and);

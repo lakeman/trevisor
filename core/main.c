@@ -48,9 +48,12 @@
 #include "process.h" 
 #include "regs.h"
 #include "sleep.h"
+#include "sse.h"
 #include "string.h"
 #include "svm.h"
 #include "svm_init.h"
+#include "tresor.h"
+#include "tresor_asm.h"
 #include "types.h"
 #include "vcpu.h"
 #include "vmmcall.h"
@@ -456,6 +459,12 @@ vmm_main (struct multiboot_info *mi_arg)
 	memcpy (&mi, mi_arg, sizeof (struct multiboot_info));
 	initfunc_init ();
 	call_initfunc ("global");
+#ifdef TRESOR
+    if (tresor_capable() == 0) {
+        panic ("CPU is not TRESOR capable"); 
+    }
+    enableSSE();
+#endif
 	start_all_processors (bsp_proc, ap_proc);
 }
 

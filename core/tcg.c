@@ -289,4 +289,86 @@ tcg_measure (void *virt, u32 len)
 		printf ("EventNumber = %u\n", s.output.EventNumber);
 	unmapmem (log, 32);
 }
+
+
+#define TPM_ORDINAL_PCRREAD     21
+#define TPM_ORDINAL_STARTUP     0x00000099
+#define READ_PCR_RESULT_SIZE    30
+#define TPM_TAG_RQU_COMMAND     193
+#define TPM_DIGEST_SIZE         20
+#define TPM_REQ_HEADER_SIZE     (sizeof(u16) + sizeof(u32) + sizeof(u32))
+
+
+#define TPM_ST_CLEAR                     0x1
+#define TPM_ST_STATE                     0x2
+#define TPM_ST_DEACTIVATED               0x3
+
+#define HTONS(x) ( ( (((unsigned short)(x)) >>8) & 0xff) | \
+                ((((unsigned short)(x)) & 0xff)<<8) )
+#define NTOHS(x) ( ( (((unsigned short)(x)) >>8) & 0xff) | \
+                ((((unsigned short)(x)) & 0xff)<<8) )
+#define HTONL(x) ((((x)>>24) & 0xffL) | (((x)>>8) & 0xff00L) | \
+                (((x)<<8) & 0xff0000L) | (((x)<<24) & 0xff000000L))
+#define NTOHL(x) ((((x)>>24) & 0xffL) | (((x)>>8) & 0xff00L) | \
+                (((x)<<8) & 0xff0000L) | (((x)<<24) & 0xff000000L))
+
+
+struct tpm_cmd_header {
+         u16  tag;
+         u32  length;
+         u32  ordinal;
+}__attribute__((packed));
+ 
+struct tpm_cmd_params {
+      u32  pcr_idx;
+}__attribute__((packed));
+
+
+struct tpm_cmd_t {
+      struct tpm_cmd_header  header;
+      struct tpm_cmd_params  params;
+}__attribute__((packed));
+
+struct TPM_PCRRead_oblk {
+        u16 tag;
+        u32 paramSize;
+        u32 returnCode;
+        u8  outDigest[20];
+} __attribute__ ((packed));
+
+#define PCR_ILENGTH 8 + TPM_REQ_HEADER_SIZE + 4
+#define PCR_OLENGTH 4 + TPM_REQ_HEADER_SIZE + 20
+int read_pcr(u32 idx, u8 *hash) 
+{
+    u32 rc;
+    struct tpm_cmd_t cmd;
+    struct TCG_PassThroughToTPM_input_param_blk* input;
+    struct TCG_PassThroughToTPM_output_param_blk* output;
+    struct TPM_PCRRead_oblk* pcr_out;
+    u8 tmp[PCR_ILENGTH];
+    u8 tmp2[PCR_OLENGTH];
+   
+    static struct tpm_cmd_header pcrread_header = {
+         .tag = HTONS(TPM_TAG_RQU_COMMAND),
+         .length = HTONL(14),
+         .ordinal = HTONL(TPM_ORDINAL_PCRREAD)
+    };
+
+    input = (struct TCG_PassThroughToTPM_input_param_blk*) tmp;
+    output = (struct TCG_PassThroughToTPM_output_param_blk*) tmp2;
+ 
+    cmd.header = pcrread_header;
+    cmd.params.pcr_idx = HTONL(idx);
+
+    input->IPBLength = PCR_ILENGTH;
+    input->OPBLength = PCR_OLENGTH;
+    memcpy(&input->TPMOperandIn, &cmd, TPM_REQ_HEADER_SIZE + 4);
+    int1a_TCG_PassThroughToTPM (input, output, PCR_OLENGTH, &rc);
+    
+    pcr_out = (struct TPM_PCRRead_oblk*)&(output->TPMOperandOut);
+
+    memcpy(hash, pcr_out->outDigest, TPM_DIGEST_SIZE);
+    return rc;
+}
+
 #endif

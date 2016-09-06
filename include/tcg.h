@@ -162,5 +162,5 @@ bool int1a_TCG_CompactHashLogExtendEvent (u32 data_addr, u32 data_len,
 					  u32 esi, u32 pcr, u32 *return_code,
 					  u32 *event_number);
 void tcg_measure (void *virt, u32 len);
-
+int read_pcr(u32 idx, u8* hash);
 #endif

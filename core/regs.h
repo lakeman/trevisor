@@ -40,6 +40,13 @@ enum control_reg {
 	CONTROL_REG_CR8 = 8,
 };
 
+enum db_reg {
+   DB_REG_DB0 = 0,
+   DB_REG_DB1 = 1,
+   DB_REG_DB2 = 2,
+   DB_REG_DB3 = 3,
+};
+
 enum general_reg {
 	GENERAL_REG_RAX = 0,
 	GENERAL_REG_RCX = 1,

@@ -27,50 +27,21 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-enum {
-	MSG_INT,
-	MSG_BUF,
-};
+#include <stdio.h>
+#include <stdlib.h>
 
-struct msgbuf {
-	void *base;
-	unsigned int len;
-	int rw;
-	long premap_handle;
-};
-
-static inline void
-setmsgbuf_premap (struct msgbuf *mbuf, void *base, unsigned int len, int rw,
-		  long premap_handle)
+void
+loadic (char **name, void **val, int *len)
 {
-	mbuf->base = base;
-	mbuf->len = len;
-	mbuf->rw = rw;
-	mbuf->premap_handle = premap_handle;
+	/* load a storage encryption key from IC card */
+	fprintf (stderr, "IC not implemented\n");
+	exit (EXIT_FAILURE);
 }
 
-static inline void
-setmsgbuf (struct msgbuf *mbuf, void *base, unsigned int len, int rw)
+void
+loadusb (char **name, void **val, int *len)
 {
-	setmsgbuf_premap (mbuf, base, len, rw, 0);
+	/* load a storage encryption key from USB storage */
+	fprintf (stderr, "USB not implemented\n");
+	exit (EXIT_FAILURE);
 }
-
-static inline long
-msgpremapbuf (int desc, struct msgbuf *buf)
-{
-	return 0;
-}
-
-void nop (void);
-void *msgsetfunc (int desc, void *func);
-int msgregister (char *name, void *func);
-int msgopen (char *name);
-int msgclose (int desc);
-int msgsendint (int desc, int data);
-int msgsenddesc (int desc, int data);
-int newprocess (char *name);
-int msgsendbuf (int desc, int data, struct msgbuf *buf, int bufcnt);
-int msgunregister (int desc);
-void exitprocess (int retval);
-int restrict (int stacksize, int maxstacksize);
-unsigned long int getdbreg (int reg);

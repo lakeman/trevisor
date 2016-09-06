@@ -41,8 +41,10 @@
 #include "seg.h"
 #include "sleep.h"
 #include "spinlock.h"
+#include "sse.h"
 #include "string.h"
 #include "thread.h"
+#include "tresor_asm.h"
 
 #define APINIT_ADDR		((APINIT_SEGMENT << 4) + APINIT_OFFSET)
 #define APINIT_SIZE		(cpuinit_end - cpuinit_start)
@@ -112,6 +114,9 @@ bspinitproc1 (void)
 asmlinkage void
 apinitproc0 (void)
 {
+#ifdef TRESOR
+        enableSSE();
+#endif
 	newstack_tmp = alloc (VMM_STACKSIZE);
 	asm_wrrsp_and_jmp ((ulong)newstack_tmp + VMM_STACKSIZE, apinitproc1);
 }

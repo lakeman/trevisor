@@ -43,6 +43,7 @@
 #include "svm_main.h"
 #include "svm_paging.h"
 #include "svm_regs.h"
+#include "tresor.h"
 #include "thread.h"
 #include "vmmerr.h"
 #include "vmmcall.h"
@@ -296,7 +297,11 @@ svm_task_switch (void)
 	task_switch_load_segdesc (tss32_2.gs, gdtr_base, gdtr_limit,
 				  &vmcb->gs);
 	svm_read_control_reg (CONTROL_REG_CR0, &tmp);
-	tmp |= CR0_TS_BIT;
+#ifdef TRESOR
+    tmp &= ~CR0_TS_BIT;
+#else
+    tmp |= CR0_TS_BIT;
+#endif
 	svm_write_control_reg (CONTROL_REG_CR0, tmp);
 	/* When source of the task switch is an interrupt, intr info
 	 * which contains information of the interrupt needs to be
@@ -324,6 +329,13 @@ do_readwrite_cr (void)
 	err = cpu_interpreter ();
 	if (err != VMMERR_SUCCESS)
 		panic ("ERR %d", err);
+}
+
+static void
+do_readwrite_dr (void)
+{
+    printf("DR access blocked\n");
+	current->u.svm.vi.vmcb->rip += 3;
 }
 
 static void
@@ -400,6 +412,70 @@ svm_exit_code (void)
 	case VMEXIT_CR4_WRITE:
 		do_readwrite_cr ();
 		break;
+    case VMEXIT_DR0_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR1_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR2_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR3_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR4_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR5_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR6_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR7_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR8_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR9_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR10_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR11_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR12_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR13_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR14_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR15_READ:
+        do_readwrite_dr();break;
+    case VMEXIT_DR0_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR1_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR2_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR3_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR4_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR5_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR6_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR7_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR8_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR9_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR10_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR11_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR12_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR13_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR14_WRITE:
+        do_readwrite_dr();break;
+    case VMEXIT_DR15_WRITE:
+        do_readwrite_dr();break;
 	case VMEXIT_IOIO:
 		svm_ioio ();
 		break;
@@ -467,6 +543,10 @@ static void
 svm_mainloop (void)
 {
 	for (;;) {
+#ifdef TRESOR
+        if (currentcpu->cpunum != 0)
+        tresor_init_ap();
+#endif
 		schedule ();
 		panic_test ();
 		if (current->sx_init.get_init_count ())

@@ -272,6 +272,8 @@ static int ata_handle_pio_identify(struct ata_channel *channel, int rw)
 	ata_convert_string(identity->firmware_revision, revision, 8); revision[8] = '\0';
 	ata_convert_string(identity->model_number, model, 40); model[40] = '\0';
 	printf("ATA IDENTIFY(ata%02d): \"%40s\" \"%8s\" \"%20s\"\n", busid, model, revision, serial);
+    printf("Device 0: host_id: %d device_id: %d\n", channel->device[0].storage_host_id, channel->device[0].storage_device_id);
+    printf("Device 1: host_id: %d device_id: %d\n", channel->device[1].storage_host_id, channel->device[1].storage_device_id);
 	ata_convert_string(ata_virtual_model, identity->model_number, 40);
 	ata_convert_string(ata_virtual_revision, identity->firmware_revision, 8);
 	return CORE_IO_RET_DEFAULT;

@@ -45,6 +45,7 @@ typedef unsigned long ulong;
 #define SYS_MSGUNREGISTER	12
 #define SYS_EXITPROCESS		13
 #define SYS_RESTRICT		14
+#define SYS_GETDBREG       15
 
 #ifdef __x86_64__
 #	define DOSYSCALL0(rb, ra) asm volatile \
@@ -195,3 +196,12 @@ restrict (int stacksize, int maxstacksize)
 	DOSYSCALL2 (SYS_RESTRICT, stacksize, maxstacksize, tmp);
 	return (int)tmp;
 }
+
+unsigned long int
+getdbreg (int reg)
+{
+    ulong tmp;
+    DOSYSCALL1 (SYS_GETDBREG, reg, tmp);
+    return tmp;
+}
+        

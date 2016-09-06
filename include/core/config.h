@@ -167,6 +167,7 @@ struct storage_keys_conf {
 	u8 keyindex;
 	u16 keybits;
 	char extend[256];
+    char salt[8];
 } __attribute__ ((packed));
 
 struct config_data_storage {
