@@ -36,12 +36,13 @@
 #include <core/mmio.h>
 #include <core/timer.h>
 #include "pci.h"
+#include "pci_conceal.h"
 #include "usb.h"
 #include "usb_device.h"
 #include "ehci.h"
 #include "ehci_debug.h"
 
-static const char driver_name[] = "ehci_generic_driver";
+static const char driver_name[] = "ehci";
 static const char driver_longname[] = 
 	"Generic EHCI para pass-through driver 0.9";
 static const char virtual_model[40] = 
@@ -103,10 +104,14 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 	u32 *reg, val;
 	u64 portno = 0;
 	int ret = 0;
+	u32 buf32 = 0;
 
 	if (!host)
 		return 0;
 
+	ASSERT (len <= sizeof buf32);
+	if (wr)
+		memcpy (&buf32, buf, len);
 	offset = gphys - host->iobase;
 	reg = (u32 *)mapmem_gphys(gphys, sizeof(u32), MAPMEM_WRITE|MAPMEM_PCD);
 
@@ -155,11 +160,16 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 			break;
 		case 0x08: /* HCCPARAMS */
 			REGPRN(2, wr, "HCCPARAMS");
-			if (!wr)
+			if (!wr) {
 				dprintf(3, "= %08x[ADDR:%2d, EECP:%02x]", 
 					  *reg, 
 					  32 + (*reg & 0x00000001) * 32,
 					  (*reg & 0x0000ff00) >> 8);
+				/* FIXME: The ehci driver does not
+				   support the 64-bit addressing yet. */
+				buf32 = *reg & ~0x00000001;
+				ret = 1;
+			}
 			dprintf(3, "\n");
 			break;
 		case 0x0c: /* HCSP-PORTROUTE */
@@ -191,7 +201,7 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 					dprintf(3, "LHCRESET,");
 				dprintf(3, "]\n");
 			} else {
-				u32 cmd = *(u32 *)buf;
+				u32 cmd = buf32;
 				dprintft(3, "write(USBCMD, %08x[", cmd);
 				if (cmd & 0x00000001) {
 					dprintf(3, "RUN,");
@@ -214,8 +224,7 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 					dprintf(3, "ASEN,");
 					if (!host->enable_async) {
 #if defined(ENABLE_DELAYED_START)
-						*(u32 *)buf = 
-							cmd & ~(0x00000020U);
+						buf32 = cmd & ~(0x00000020U);
 #endif /* defined(ENABLE_DELAYED_START) */
 						usb_sc_lock(host->usb_host);
 						host->enable_async = 1;
@@ -235,7 +244,7 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 				} else {
 					usb_sc_lock(host->usb_host);
 					if (host->doorbell)
-						*(u32 *)buf |= 0x00000040U;
+						buf32 |= 0x00000040U;
 					usb_sc_unlock(host->usb_host);
 				}
 				if (cmd & 0x00000080)
@@ -279,7 +288,7 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 				dprintf(3, "]\n");
 			} else {
 				dprintft(3, "write(USBSTS, %08x, %d)\n", 
-					*(u32 *)buf, len);
+					buf32, len);
 			}
 			break;
 		case 0x08: /* USBINTR */
@@ -287,7 +296,7 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 				dprintft(3, "read(USBINTR, %d) = %08x\n", 
 					len, *reg);
 			} else {
-				u32 intr = *(u32 *)buf;
+				u32 intr = buf32;
 				dprintft(3, "write(USBINTR, %08x[", intr);
 				if (intr & 0x00000001)
 					dprintf(3, "INT,");
@@ -314,7 +323,7 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 			break;
 		case 0x10: /* CTRLDSSEGMENT */
 			REGPRN(2, wr, "CTRLDSSEGMENT");
-			val = (wr) ? *(u32 *)buf : *(u32 *)reg;
+			val = (wr) ? buf32 : *(u32 *)reg;
 			dprintf(3, ": %08x\n", val);
 			break;
 		case 0x14: /* PERIODICLISTBASE */
@@ -323,15 +332,15 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 		case 0x18: /* ASYNCLISTADDR */
 			REGPRN(2, wr, "ASYNCLISTADDR");
 			if (wr) {
-				dprintf(3, ": %08x", *(u32 *)buf);
+				dprintf(3, ": %08x", buf32);
 				usb_sc_lock(host->usb_host);
 				if (host->headqh_phys[0] &&
 				    (host->headqh_phys[0] != 
-				     (*(u32 *)buf & 0xffffffe0U)))
+				     (buf32 & 0xffffffe0U)))
 					dprintft(1, "FATAL: "
 						 "overwrite address!!\n");
 				host->headqh_phys[0] = 
-					*(u32 *)buf & 0xffffffe0U;
+					buf32 & 0xffffffe0U;
 				host->usb_stopped = 0;
 				host->hcreset = 0;
 				if (host->headqh_phys[0] && 
@@ -349,11 +358,10 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 #endif
 			} else {
 				usb_sc_lock(host->usb_host);
-				*(u32 *)buf = 
-					host->headqh_phys[0] | 0x00000002U;
+				buf32 = host->headqh_phys[0] | 0x00000002U;
 				usb_sc_unlock(host->usb_host);
 				dprintf(3, ": %08x == %08x\n", 
-					*(u32 *)buf, *(u32 *)reg);
+					buf32, *(u32 *)reg);
 				ret = 1;
 			}
 			break;
@@ -365,7 +373,7 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 				else
 					dprintf(3, ": ROUTE TO CLASSIC HC\n");
 			} else {
-				u32 cflag = *(u32 *)buf;
+				u32 cflag = buf32;
 				if (cflag)
 					dprintf(3, ": ROUTE TO EHCI");
 				else
@@ -442,12 +450,12 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 				dprintf(4, "]\n");
 			} else {
 				u16 port_sc;
-				port_sc = *(u32 *)buf & 0x0000FFFF;
+				port_sc = buf32 & 0x0000FFFF;
 
 				handle_port_reset(host->usb_host, portno,
 							port_sc, 8);
 				dprintft(3, "write(PORTSC%d, %08x, %d)\n", 
-					 portno + 1, *(u32 *)buf, len);
+					 portno + 1, buf32, len);
 			}
 			break;
 		default:
@@ -458,12 +466,14 @@ ehci_register_handler(void *data, phys_t gphys, bool wr, void *buf,
 	}
 	unmapmem(reg, sizeof(u32));
 
+	if (ret && !wr)
+		memcpy (buf, &buf32, len);
 	return ret;
 }
 
-static int 
-ehci_config_read(struct pci_device *pci_device, 
-		 core_io_t io, u8 offset, union mem *data)
+static int
+ehci_config_read (struct pci_device *pci_device, u8 iosize, u16 offset,
+		  union mem *data)
 {
 	switch (offset) {
 	case PCI_CONFIG_BASE_ADDRESS0:
@@ -482,9 +492,9 @@ ehci_config_read(struct pci_device *pci_device,
 	return CORE_IO_RET_DEFAULT;
 }
 
-static int 
-ehci_config_write(struct pci_device *pci_device, 
-		  core_io_t io, u8 offset, union mem *data)
+static int
+ehci_config_write (struct pci_device *pci_device, u8 iosize, u16 offset,
+		   union mem *data)
 {
 	struct ehci_host *host = pci_device->host;
 	u32 iobase;
@@ -517,8 +527,7 @@ ehci_config_write(struct pci_device *pci_device,
 static struct pci_driver ehci_driver = {
 	.name		= driver_name,
 	.longname	= driver_longname,
-	.id		= { PCI_ID_ANY, PCI_ID_ANY_MASK },
-	.class		= { 0x0C0320, 0xFFFFFF },
+	.device		= "class_code=0c0320",
 	.new		= ehci_new,	
 	.config_read	= ehci_config_read,
 	.config_write	= ehci_config_write,
@@ -546,6 +555,7 @@ ehci_conceal_new(struct pci_device *pci_device)
 	void *handle;
 
 	printf("An EHCI host controller found. Disable it.\n");
+	pci_conceal_new (pci_device);
 	iobase = pci_device->config_space.base_address[0];
 	if ((iobase == 0) || (iobase >= 0xffffffdeU))
 		return;
@@ -574,32 +584,13 @@ ehci_conceal_new(struct pci_device *pci_device)
 	return;
 }
 
-static int 
-ehci_conceal_config_read(struct pci_device *pci_device, 
-		 core_io_t io, u8 offset, union mem *data)
-{
-	/* provide fake values 
-	   for reading the PCI configration space. */
-	data->dword = 0UL;
-	return CORE_IO_RET_DONE;
-}
-
-static int 
-ehci_conceal_config_write(struct pci_device *pci_device, 
-		  core_io_t io, u8 offset, union mem *data)
-{
-	/* do nothing, ignore any writing. */
-	return CORE_IO_RET_DONE;
-}
-
 static struct pci_driver ehci_conceal_driver = {
-	.name		= driver_name,
+	.name		= "ehci_conceal",
 	.longname	= driver_longname,
-	.id		= { PCI_ID_ANY, PCI_ID_ANY_MASK },
-	.class		= { 0x0C0320, 0xFFFFFF },
+	.device		= "class_code=0c0320",
 	.new		= ehci_conceal_new,	
-	.config_read	= ehci_conceal_config_read,
-	.config_write	= ehci_conceal_config_write,
+	.config_read	= pci_conceal_config_read,
+	.config_write	= pci_conceal_config_write,
 };
 
 /**
@@ -608,10 +599,8 @@ static struct pci_driver ehci_conceal_driver = {
 void 
 ehci_init(void) __initcode__
 {
-	if (config.vmm.driver.concealEHCI)
-		pci_register_driver(&ehci_conceal_driver);
-	else if (config.vmm.driver.usb.ehci)
-		pci_register_driver(&ehci_driver);
+	pci_register_driver(&ehci_conceal_driver);
+	pci_register_driver(&ehci_driver);
 	return;
 }
 PCI_DRIVER_INIT(ehci_init);

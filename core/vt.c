@@ -86,7 +86,6 @@ static struct vmctl_func func = {
 	vt_iopass,
 	vt_exint_pass,
 	vt_exint_pending,
-	vt_extern_iopass,
 	vt_init_signal,
 	vt_tsc_offset_changed,
 	vt_panic_dump,
@@ -97,6 +96,7 @@ static struct vmctl_func func = {
 	vt_enable_resume,
 	vt_resume,
 	vt_paging_map_1mb,
+	vt_msrpass,
 };
 
 void
@@ -150,30 +150,47 @@ vt_generate_external_int (u32 num)
 	}
 }
 
-static void
-vt_exint_pass (bool enable)
+void
+vt_update_exint (void)
 {
-	ulong pin;
+	ulong pin, proc;
+	bool pass, pending;
 
+	pass = current->u.vt.exint_pass;
+	pending = current->u.vt.exint_pending;
+	if (pass && current->u.vt.vr.re) {
+		if (current->u.vt.exint_re_pending)
+			pending = true;
+		else
+			pass = false;
+	}
 	asm_vmread (VMCS_PIN_BASED_VMEXEC_CTL, &pin);
-	if (enable)
+	if (pass)
 		pin &= ~VMCS_PIN_BASED_VMEXEC_CTL_EXINTEXIT_BIT;
 	else
 		pin |= VMCS_PIN_BASED_VMEXEC_CTL_EXINTEXIT_BIT;
 	asm_vmwrite (VMCS_PIN_BASED_VMEXEC_CTL, pin);
-}
-
-static void
-vt_exint_pending (bool pending)
-{
-	ulong proc;
-
 	asm_vmread (VMCS_PROC_BASED_VMEXEC_CTL, &proc);
 	if (pending)
 		proc |= VMCS_PROC_BASED_VMEXEC_CTL_INTRWINEXIT_BIT;
 	else
 		proc &= ~VMCS_PROC_BASED_VMEXEC_CTL_INTRWINEXIT_BIT;
 	asm_vmwrite (VMCS_PROC_BASED_VMEXEC_CTL, proc);
+	current->u.vt.exint_update = false;
+}
+
+static void
+vt_exint_pass (bool enable)
+{
+	current->u.vt.exint_pass = enable;
+	current->u.vt.exint_update = true;
+}
+
+static void
+vt_exint_pending (bool pending)
+{
+	current->u.vt.exint_pending = pending;
+	current->u.vt.exint_update = true;
 }
 
 static bool
@@ -203,11 +220,7 @@ vt_invlpg (ulong addr)
 static void
 vt_tsc_offset_changed (void)
 {
-	u32 l, h;
-
-	conv64to32 (current->tsc_offset, &l, &h);
-	asm_vmwrite (VMCS_TSC_OFFSET, l);
-	asm_vmwrite (VMCS_TSC_OFFSET_HIGH, h);
+	asm_vmwrite64 (VMCS_TSC_OFFSET, current->tsc_offset);
 }
 
 void

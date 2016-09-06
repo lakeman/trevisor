@@ -28,10 +28,13 @@
  */
 
 #include "arith.h"
-#include "debug.h"
+#include "calluefi.h"
+#include "config.h"
+#include "cpu.h"
 #include "initfunc.h"
 #include "list.h"
 #include "mm.h"
+#include "pcpu.h"
 #include "printf.h"
 #include "process.h"
 #include "putchar.h"
@@ -39,7 +42,10 @@
 #include "spinlock.h"
 #include "string.h"
 #include "tty.h"
+#include "uefi.h"
 #include "vramwrite.h"
+
+#define PANICMEM_KEY_INVERT "bitvisor panic log"
 
 struct tty_udp_data {
 	LIST1_DEFINE (struct tty_udp_data);
@@ -48,12 +54,23 @@ struct tty_udp_data {
 	void *handle;
 };
 
+struct ttylog_in_panicmem {
+	u8 key[24];
+	u32 crc;
+	u32 len;
+	unsigned char buf[];
+};
+
+static struct {
+	unsigned int logoffset, loglen;
+	unsigned char log[65536];
+}  __attribute__ ((aligned (0x1000), packed)) logbuf;
 static int ttyin, ttyout;
-static unsigned char log[65536];
-static int logoffset, loglen;
 static spinlock_t putchar_lock;
 static bool logflag;
 static LIST1_DEFINE_HEAD (struct tty_udp_data, tty_udp_list);
+static unsigned char uefi_log[1024];
+static int uefi_logoffset;
 
 static int
 ttyin_msghandler (int m, int c)
@@ -79,10 +96,11 @@ ttylog_msghandler (int m, int c, struct msgbuf *buf, int bufcnt)
 
 	if (m == 1 && bufcnt >= 1) {
 		q = buf[0].base;
-		for (i = 0; i < buf[0].len && i < loglen; i++)
-			q[i] = log[(logoffset + i) % sizeof log];
+		for (i = 0; i < buf[0].len && i < logbuf.loglen; i++)
+			q[i] = logbuf.log[(logbuf.logoffset + i) %
+					  sizeof logbuf.log];
 	}
-	return loglen;
+	return logbuf.loglen;
 }
 
 void
@@ -104,7 +122,8 @@ mkudp (char *buf, char *src, int sport, char *dst, int dport,
 {
 	u16 sum;
 
-	memcpy (buf, "\x45\x00\x00\x00\x00\x01\x00\x00\x01\x11\x00\x00", 12);
+	/* TTL=64 */
+	memcpy (buf, "\x45\x00\x00\x00\x00\x01\x00\x00\x40\x11\x00\x00", 12);
 	wshort (buf + 2,  datalen + 8 + 20);
 	memcpy (buf + 12, src, 4);
 	memcpy (buf + 16, dst, 4);
@@ -122,6 +141,35 @@ mkudp (char *buf, char *src, int sport, char *dst, int dport,
 	return datalen + 8 + 20;
 }
 
+static void
+tty_syslog_putchar (unsigned char c)
+{
+	struct tty_udp_data *p;
+	unsigned int pktsiz = 0;
+	char pkt[64 + 80 + 9];
+	static char buf[80 + 9];
+	static int len;
+
+	if ((c < ' ' && c != '\n') || c > '~')
+		return;
+	spinlock_lock (&putchar_lock);
+	if (!len)
+		len = snprintf (buf, sizeof buf, "bitvisor:");
+	buf[len++] = c;
+	if (len == sizeof buf || c == '\n') {
+		memcpy (pkt + 12, "\x08\x00", 2);
+		pktsiz = mkudp (pkt + 14,
+				(char *)config.vmm.tty_syslog.src_ipaddr, 514,
+				(char *)config.vmm.tty_syslog.dst_ipaddr, 514,
+				buf, len) + 14;
+		len = 0;
+	}
+	spinlock_unlock (&putchar_lock);
+	if (pktsiz)
+		LIST1_FOREACH (tty_udp_list, p)
+			p->tty_send (p->handle, pkt, pktsiz);
+}
+
 /* how to receive the messages:
    perl -e '$|=1;use Socket;
    socket(S, PF_INET, SOCK_DGRAM, 0);
@@ -134,6 +182,10 @@ tty_udp_putchar (unsigned char c)
 	unsigned int pktsiz;
 	char pkt[64];
 
+	if (config.vmm.tty_syslog.enable) {
+		tty_syslog_putchar (c);
+		return;
+	}
 	LIST1_FOREACH (tty_udp_list, p) {
 		memcpy (pkt + 12, "\x08\x00", 2);
 		pktsiz = mkudp (pkt + 14, "\x00\x00\x00\x00", 10,
@@ -145,20 +197,47 @@ tty_udp_putchar (unsigned char c)
 void
 tty_putchar (unsigned char c)
 {
+	int i;
+
 	if (logflag) {
 		spinlock_lock (&putchar_lock);
-		log[(logoffset + loglen) % sizeof log] = c;
-		if (loglen == sizeof log)
-			logoffset = (logoffset + 1) % sizeof log;
+		logbuf.log[(logbuf.logoffset + logbuf.loglen) %
+			   sizeof logbuf.log] = c;
+		if (logbuf.loglen == sizeof logbuf.log)
+			logbuf.logoffset = (logbuf.logoffset + 1) %
+				sizeof logbuf.log;
 		else
-			loglen++;
+			logbuf.loglen++;
 		spinlock_unlock (&putchar_lock);
 	}
 	tty_udp_putchar (c);
 #ifdef TTY_SERIAL
 	serial_putchar (c);
 #else
-	vramwrite_putchar (c);
+	if (uefi_booted) {
+		if (currentcpu_available () && currentcpu->pass_vm_created) {
+			spinlock_lock (&putchar_lock);
+			for (i = 0; i < uefi_logoffset; i++)
+				vramwrite_putchar (uefi_log[i]);
+			uefi_logoffset = 0;
+			spinlock_unlock (&putchar_lock);
+			vramwrite_putchar (c);
+		} else if (currentcpu_available () && get_cpu_id () == 0) {
+			spinlock_lock (&putchar_lock);
+			for (i = 0; i < uefi_logoffset; i++)
+				call_uefi_putchar (uefi_log[i]);
+			uefi_logoffset = 0;
+			call_uefi_putchar (c);
+			spinlock_unlock (&putchar_lock);
+		} else {
+			spinlock_lock (&putchar_lock);
+			if (uefi_logoffset < sizeof uefi_log)
+				uefi_log[uefi_logoffset++] = c;
+			spinlock_unlock (&putchar_lock);
+		}
+	} else {
+		vramwrite_putchar (c);
+	}
 #endif
 }
 
@@ -174,25 +253,122 @@ tty_udp_register (void (*tty_send) (void *handle, void *packet,
 	LIST1_ADD (tty_udp_list, p);
 }
 
+void
+tty_get_logbuf_info (virt_t *virt, phys_t *phys, uint *size)
+{
+	if (virt)
+		*virt = (virt_t)&logbuf;
+	if (phys)
+		*phys = sym_to_phys (&logbuf);
+	if (size)
+		*size = sizeof logbuf;
+}
+
+static void
+ttylog_copy_to_panicmem_one (struct ttylog_in_panicmem *mem, int memlen,
+			     int *flag)
+{
+	int i, copylen;
+	int copyoff;
+
+	copyoff = 0;
+	copylen = logbuf.loglen;
+	if (copylen > memlen - sizeof *mem) {
+		copyoff = copylen - (memlen - sizeof *mem);
+		copylen = memlen - sizeof *mem;
+	}
+	for (i = 0; i < copylen; i++)
+		mem->buf[i] = logbuf.log[(logbuf.logoffset + copyoff + i) %
+					 sizeof logbuf.log];
+	mem->len = copylen;
+	mem->crc = 0;
+	for (i = 0; i < sizeof mem->key && i < sizeof PANICMEM_KEY_INVERT; i++)
+		mem->key[i] = ~PANICMEM_KEY_INVERT[i];
+	for (; i < sizeof mem->key; i++)
+		mem->key[i] = 0xFF;
+	mem->crc = crc32 (mem, sizeof *mem + copylen);
+}
+
+static void
+ttylog_copy_from_panicmem_one (struct ttylog_in_panicmem *mem, int memlen,
+			       int *flag)
+{
+	int i, copylen;
+	u32 crc, crccalc;
+
+	if (*flag)
+		goto clear;
+	copylen = mem->len;
+	if (copylen > memlen - sizeof *mem)
+		goto clear;
+	for (i = 0; i < sizeof mem->key && i < sizeof PANICMEM_KEY_INVERT; i++)
+		if (mem->key[i] != (u8)~PANICMEM_KEY_INVERT[i])
+			goto clear;
+	for (; i < sizeof mem->key; i++)
+		if (mem->key[i] != 0xFF)
+			goto clear;
+	crc = mem->crc;
+	mem->crc = 0;
+	crccalc = crc32 (mem, sizeof *mem + copylen);
+	if (crc != crccalc)
+		goto clear;
+	printf ("Old log found in RAM\n");
+	*flag = 1;
+	for (i = 0; i < copylen && logbuf.loglen < sizeof logbuf.log; i++) {
+		logbuf.logoffset--;
+		logbuf.loglen++;
+		logbuf.log[logbuf.logoffset % sizeof logbuf.log] =
+			mem->buf[copylen - i - 1];
+	}
+clear:
+	memset (mem, 0, sizeof *mem);
+}
+
+static void
+ttylog_copy_panicmem (void (*copy_one) (struct ttylog_in_panicmem *mem,
+					int memlen, int *flag))
+{
+	struct ttylog_in_panicmem *mem;
+	int memlen;
+	int flag = 0;
+
+	mem = mm_get_panicmem (&memlen);
+	if (!mem)
+		return;
+	while (memlen > sizeof logbuf + sizeof *mem) {
+		copy_one (mem, memlen, &flag);
+		mem = (void *)((u8 *)mem + sizeof logbuf + sizeof *mem);
+		memlen -= sizeof logbuf + sizeof *mem;
+	}
+}
+
+void
+ttylog_copy_to_panicmem (void)
+{
+	ttylog_copy_panicmem (ttylog_copy_to_panicmem_one);
+}
+
+void
+ttylog_copy_from_panicmem (void)
+{
+	ttylog_copy_panicmem (ttylog_copy_from_panicmem_one);
+}
+
 static void
 tty_init_global2 (void)
 {
-	char buf[100];
-
-	snprintf (buf, 100, "tty:log=%p,logoffset=%p,loglen=%p,logmax=%lu\n",
-		  log, &logoffset, &loglen, (unsigned long)sizeof log);
-	debug_addstr (buf);
 	LIST1_HEAD_INIT (tty_udp_list);
 }
 
 static void
 tty_init_global (void)
 {
-	logoffset = 0;
-	loglen = 0;
+	logbuf.logoffset = 0;
+	logbuf.loglen = 0;
 	logflag = true;
 	spinlock_init (&putchar_lock);
-	vramwrite_init_global ((void *)0x800B8000);
+	if (!uefi_booted)
+		vramwrite_init_global ((void *)0x800B8000);
 	putchar_set_func (tty_putchar, NULL);
 }
 

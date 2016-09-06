@@ -36,6 +36,7 @@
 #include "exint_pass.h"
 #include "gmm_pass.h"
 #include "initfunc.h"
+#include "int.h"
 #include "linkage.h"
 #include "panic.h"
 #include "pcpu.h"
@@ -57,6 +58,7 @@
 #include "vt_vmcs.h"
 
 #define EPT_VIOLATION_EXIT_QUAL_WRITE_BIT 0x2
+#define STAT_EXIT_REASON_MAX EXIT_REASON_XSETBV
 
 enum vt__status {
 	VT__VMENTRY_SUCCESS,
@@ -70,6 +72,7 @@ static u32 stat_swexcnt = 0;
 static u32 stat_pfcnt = 0;
 static u32 stat_iocnt = 0;
 static u32 stat_hltcnt = 0;
+static u32 stat_exit_reason[STAT_EXIT_REASON_MAX + 1];
 
 static void
 do_mov_cr (void)
@@ -190,6 +193,53 @@ vt_update_exception_bmp (void)
 }
 
 static void
+vt_generate_nmi (void)
+{
+	struct vt_intr_data *vid = &current->u.vt.intr;
+
+	if (current->u.vt.vr.re)
+		panic ("NMI in real mode");
+	vid->vmcs_intr_info.v = 0;
+	vid->vmcs_intr_info.s.vector = EXCEPTION_NMI;
+	vid->vmcs_intr_info.s.type = INTR_INFO_TYPE_NMI;
+	vid->vmcs_intr_info.s.err = INTR_INFO_ERR_INVALID;
+	vid->vmcs_intr_info.s.valid = INTR_INFO_VALID_VALID;
+	vid->vmcs_instruction_len = 0;
+}
+
+/* NMI handler.  FIXME: This is currently pass-through only. */
+static void
+vt_nmi_has_come (void)
+{
+	ulong is, proc_based_vmexec_ctl;
+
+	/* If blocking by NMI bit is set, the NMI will not be
+	 * generated since an NMI handler in the guest operating
+	 * system is running. */
+	asm_vmread (VMCS_GUEST_INTERRUPTIBILITY_STATE, &is);
+	if (is & VMCS_GUEST_INTERRUPTIBILITY_STATE_BLOCKING_BY_NMI_BIT)
+		return;
+	/* If NMI-window exiting bit is set, VM Exit reason "NMI
+	   window" will generate NMI. */
+	asm_vmread (VMCS_PROC_BASED_VMEXEC_CTL, &proc_based_vmexec_ctl);
+	if (proc_based_vmexec_ctl & VMCS_PROC_BASED_VMEXEC_CTL_NMIWINEXIT_BIT)
+		return;
+	/* If blocking by STI bit and blocking by MOV SS bit are not
+	   set, generate NMI now. */
+	if (!(is & VMCS_GUEST_INTERRUPTIBILITY_STATE_BLOCKING_BY_STI_BIT) &&
+	    !(is & VMCS_GUEST_INTERRUPTIBILITY_STATE_BLOCKING_BY_MOV_SS_BIT)) {
+		vt_generate_nmi ();
+		return;
+	}
+	/* Use NMI-window exiting to get the correct timing to inject
+	 * NMIs.  This is a workaround for a processor that makes a VM
+	 * Entry failure when NMI is injected while blocking by STI
+	 * bit is set. */
+	proc_based_vmexec_ctl |= VMCS_PROC_BASED_VMEXEC_CTL_NMIWINEXIT_BIT;
+	asm_vmwrite (VMCS_PROC_BASED_VMEXEC_CTL, proc_based_vmexec_ctl);
+}
+
+static void
 do_exception (void)
 {
 	union {
@@ -279,10 +329,7 @@ do_exception (void)
 			current->u.vt.intr.vmcs_instruction_len = len;
 			break;
 		case INTR_INFO_TYPE_NMI:
-			vii.s.nmi = 0; /* FIXME */
-			current->u.vt.intr.vmcs_intr_info.v = vii.v;
-			asm_vmread (VMCS_VMEXIT_INSTRUCTION_LEN, &len);
-			current->u.vt.intr.vmcs_instruction_len = len;
+			vt_nmi_has_come ();
 			break;
 		case INTR_INFO_TYPE_EXTERNAL:
 		default:
@@ -312,6 +359,23 @@ do_vmcall (void)
 }
 
 static void
+do_nmi_window (void)
+{
+	struct vt_intr_data *vid = &current->u.vt.intr;
+	ulong proc_based_vmexec_ctl;
+
+	if (vid->vmcs_intr_info.s.valid == INTR_INFO_VALID_VALID) {
+		/* This may be incorrect behavior... */
+		printf ("Maskable interrupt and NMI at the same time\n");
+		return;
+	}
+	asm_vmread (VMCS_PROC_BASED_VMEXEC_CTL, &proc_based_vmexec_ctl);
+	proc_based_vmexec_ctl &= ~VMCS_PROC_BASED_VMEXEC_CTL_NMIWINEXIT_BIT;
+	asm_vmwrite (VMCS_PROC_BASED_VMEXEC_CTL, proc_based_vmexec_ctl);
+	vt_generate_nmi ();
+}
+
+static void
 vt__nmi (void)
 {
 	struct vt_intr_data *vid = &current->u.vt.intr;
@@ -320,14 +384,7 @@ vt__nmi (void)
 		return;
 	if (!current->nmi.get_nmi_count ())
 		return;
-	if (current->u.vt.vr.re)
-		panic ("NMI in real mode");
-	printf ("VT NMI!\n");	/* DEBUG */
-	vid->vmcs_intr_info.v = 0;
-	vid->vmcs_intr_info.s.vector = EXCEPTION_NMI;
-	vid->vmcs_intr_info.s.type = INTR_INFO_TYPE_NMI;
-	vid->vmcs_intr_info.s.err = INTR_INFO_ERR_INVALID;
-	vid->vmcs_intr_info.s.valid = INTR_INFO_VALID_VALID;
+	vt_nmi_has_come ();
 }
 
 static void
@@ -366,11 +423,14 @@ static void
 vt__vm_run_first (void)
 {
 	enum vt__status status;
+	ulong errnum;
 
 	status = call_vt__vmlaunch ();
 	if (status != VT__VMEXIT) {
+		asm_vmread (VMCS_VM_INSTRUCTION_ERR, &errnum);
 		if (status == VT__VMENTRY_FAILED)
-			panic ("Fatal error: VM entry failed.");
+			panic ("Fatal error: VM entry failed. Error %lu",
+			       errnum);
 		else
 			panic ("Fatal error: Strange status.");
 	}
@@ -380,20 +440,25 @@ static void
 vt__vm_run (void)
 {
 	enum vt__status status;
+	ulong errnum;
 
 	if (current->u.vt.first) {
 		vt__vm_run_first ();
 		current->u.vt.first = false;
 		return;
 	}
+	if (current->u.vt.exint_update)
+		vt_update_exint ();
 	if (current->u.vt.saved_vmcs)
 		spinlock_unlock (&currentcpu->suspend_lock);
 	status = call_vt__vmresume ();
 	if (current->u.vt.saved_vmcs)
 		spinlock_lock (&currentcpu->suspend_lock);
 	if (status != VT__VMEXIT) {
+		asm_vmread (VMCS_VM_INSTRUCTION_ERR, &errnum);
 		if (status == VT__VMENTRY_FAILED)
-			panic ("Fatal error: VM entry failed.");
+			panic ("Fatal error: VM entry failed. Error %lu",
+			       errnum);
 		else
 			panic ("Fatal error: Strange status.");
 	}
@@ -412,6 +477,16 @@ vt__vm_run_with_tf (void)
 	vt_read_flags (&rflags);
 	rflags &= ~RFLAGS_TF_BIT;
 	vt_write_flags (rflags);
+}
+
+static void
+clear_blocking_by_nmi (void)
+{
+	ulong is;
+
+	asm_vmread (VMCS_GUEST_INTERRUPTIBILITY_STATE, &is);
+	is &= ~VMCS_GUEST_INTERRUPTIBILITY_STATE_BLOCKING_BY_NMI_BIT;
+	asm_vmwrite (VMCS_GUEST_INTERRUPTIBILITY_STATE, is);
 }
 
 static void
@@ -441,6 +516,11 @@ vt__event_delivery_check (void)
 		} else if (ivif.s.err == INTR_INFO_ERR_VALID) {
 			asm_vmread (VMCS_IDT_VECTORING_ERRCODE, &err);
 			vid->vmcs_exception_errcode = err;
+		} else if (ivif.s.type == INTR_INFO_TYPE_NMI) {
+			/* If EPT violation happened during injecting
+			 * NMI, blocking by NMI bit is set.  It must
+			 * be cleared before injecting NMI again. */
+			clear_blocking_by_nmi ();
 		}
 	}
 	vid->vmcs_intr_info.v = ivif.v;
@@ -728,7 +808,13 @@ err:
 static void
 do_xsetbv (void)
 {
-	if (cpu_emul_xsetbv ())
+	u16 cs;
+
+	/* According to the manual, XSETBV causes a VM exit regardless
+	 * of the value of CPL.  Maybe it is different from the real
+	 * behavior, but check CPL here to be sure. */
+	vt_read_sreg_sel (SREG_CS, &cs);
+	if ((cs & 3) || cpu_emul_xsetbv ())
 		make_gp_fault (0);
 	else
 		add_ip ();
@@ -738,14 +824,49 @@ static void
 do_ept_violation (void)
 {
 	ulong eqe;
-	ulong gpl, gph;
 	u64 gp;
 
 	asm_vmread (VMCS_EXIT_QUALIFICATION, &eqe);
-	asm_vmread (VMCS_GUEST_PHYSICAL_ADDRESS, &gpl);
-	asm_vmread (VMCS_GUEST_PHYSICAL_ADDRESS_HIGH, &gph);
-	conv32to64 (gpl, gph, &gp);
+	asm_vmread64 (VMCS_GUEST_PHYSICAL_ADDRESS, &gp);
 	vt_paging_npf (!!(eqe & EPT_VIOLATION_EXIT_QUAL_WRITE_BIT), gp);
+}
+
+static void
+do_re_external_int (void)
+{
+	ulong rflags;
+	int num;
+
+	vt_read_flags (&rflags);
+	if (rflags & RFLAGS_IF_BIT) {
+		num = do_externalint_enable ();
+		if (num >= 0)
+			vt_generate_external_int (num);
+		current->u.vt.exint_re_pending = false;
+		current->u.vt.exint_update = true;
+	} else {
+		current->u.vt.exint_re_pending = true;
+		current->u.vt.exint_update = true;
+	}
+}
+
+static void
+do_external_int (void)
+{
+	if (current->u.vt.vr.re && current->u.vt.exint_pass)
+		do_re_external_int ();
+	else
+		do_exint_pass ();
+}
+
+static void
+do_interrupt_window (void)
+{
+	if (current->u.vt.exint_re_pending && current->u.vt.vr.re &&
+	    current->u.vt.exint_pass)
+		do_re_external_int ();
+	if (current->u.vt.exint_pending)
+		current->exint.hlt ();
 }
 
 static void
@@ -778,10 +899,10 @@ vt__exit_reason (void)
 		break;
 	case EXIT_REASON_EXTERNAL_INT:
 		STATUS_UPDATE (asm_lock_incl (&stat_intcnt));
-		do_exint_pass ();
+		do_external_int ();
 		break;
 	case EXIT_REASON_INTERRUPT_WINDOW:
-		current->exint.hlt ();
+		do_interrupt_window ();
 		break;
 	case EXIT_REASON_INVLPG:
 		do_invlpg ();
@@ -813,11 +934,19 @@ vt__exit_reason (void)
 	case EXIT_REASON_EPT_VIOLATION:
 		do_ept_violation ();
 		break;
+	case EXIT_REASON_NMI_WINDOW:
+		do_nmi_window ();
+		break;
 	default:
 		printf ("Fatal error: handler not implemented.\n");
 		printexitreason (exit_reason);
 		panic ("Fatal error: handler not implemented.");
 	}
+	STATUS_UPDATE (asm_lock_incl
+		       (&stat_exit_reason
+			[(exit_reason & EXIT_REASON_MASK) >
+			 STAT_EXIT_REASON_MAX ? STAT_EXIT_REASON_MAX :
+			 (exit_reason & EXIT_REASON_MASK)]));
 }
 
 static void
@@ -982,6 +1111,7 @@ vt_mainloop (void)
 		if (current->u.vt.vr.sw.enable) {
 			vt__nmi ();
 			vt__event_delivery_setup ();
+			vt_msr_own_process_msrs ();
 			vt__vm_run_with_tf ();
 			vt_paging_tlbflush ();
 			vt__event_delivery_check ();
@@ -989,6 +1119,7 @@ vt_mainloop (void)
 		} else {	/* not switching */
 			vt__nmi ();
 			vt__event_delivery_setup ();
+			vt_msr_own_process_msrs ();
 			vt__vm_run ();
 			vt_paging_tlbflush ();
 			vt__event_delivery_check ();
@@ -1000,9 +1131,32 @@ vt_mainloop (void)
 static char *
 vt_status (void)
 {
-	static char buf[1024];
+	static char buf[4096];
+	int i, n;
 
-	snprintf (buf, 1024,
+	n = snprintf (buf, 4096, "Exit Reason:\n");
+	for (i = 0; i + 7 <= STAT_EXIT_REASON_MAX; i += 8) {
+		n += snprintf
+			(buf + n, 4096 - n,
+			 " %02X: %04X %04X %04X %04X %04X %04X %04X %04X\n",
+			 i, stat_exit_reason[i + 0] & 0xFFFF,
+			 stat_exit_reason[i + 1] & 0xFFFF,
+			 stat_exit_reason[i + 2] & 0xFFFF,
+			 stat_exit_reason[i + 3] & 0xFFFF,
+			 stat_exit_reason[i + 4] & 0xFFFF,
+			 stat_exit_reason[i + 5] & 0xFFFF,
+			 stat_exit_reason[i + 6] & 0xFFFF,
+			 stat_exit_reason[i + 7] & 0xFFFF);
+	}
+	if (i <= STAT_EXIT_REASON_MAX) {
+		n += snprintf (buf + n, 4096 - n, " %02X:", i);
+		for (; i < STAT_EXIT_REASON_MAX; i++)
+			n += snprintf (buf + n, 4096 - n, " %04X",
+				       stat_exit_reason[i] & 0xFFFF);
+		n += snprintf (buf + n, 4096 - n, " %04X\n",
+			       stat_exit_reason[i] & 0xFFFF);
+	}
+	snprintf (buf + n, 4096 - n,
 		  "Interrupts: %u\n"
 		  "Hardware exceptions: %u\n"
 		  " Page fault: %u\n"
@@ -1031,11 +1185,7 @@ vt_init_signal (void)
 void
 vt_start_vm (void)
 {
-	ulong pin;
-
-	asm_vmread (VMCS_PIN_BASED_VMEXEC_CTL, &pin);
-	pin |= VMCS_PIN_BASED_VMEXEC_CTL_EXINTEXIT_BIT;
-	asm_vmwrite (VMCS_PIN_BASED_VMEXEC_CTL, pin);
+	current->exint.int_enabled ();
 	vt_paging_start ();
 	vt_mainloop ();
 }

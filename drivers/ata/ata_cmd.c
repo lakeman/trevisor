@@ -85,6 +85,7 @@ static const ata_cmd_type_t ata_cmd_type_table[256] = {
 	[0x25] = { ATA_CMD_DMA,	STORAGE_READ,  1 },	// READ DMA EXT
 	[0xCA] = { ATA_CMD_DMA,	STORAGE_WRITE, 0 },	// WRITE DMA
 	[0x35] = { ATA_CMD_DMA,	STORAGE_WRITE, 1 },	// WRITE DMA EXT
+	[0x3D] = { ATA_CMD_DMA,	STORAGE_WRITE, 1 },	// WRITE DMA FUA EXT
 
 	// QUEUED DMA
 	[0xC7] = { ATA_CMD_DMQ, STORAGE_READ,  0 },	// READ DMA QUEUED
@@ -107,6 +108,9 @@ static const ata_cmd_type_t ata_cmd_type_table[256] = {
 	[0xB0] = { ATA_CMD_THROUGH,  0, 0 },		// SMART
 	[0x2F] = { ATA_CMD_THROUGH,  0, 0 },		/* READ LOG EXT */
 	[0x06] = { ATA_CMD_THROUGH,  0, 0 }, /* DATA SET MANAGEMENT (TRIM) */
+
+	/* Passthrough DMA */
+	[0x47] = { ATA_CMD_THROUGH,  0, 0 },		/* READ LOG DMA EXT */
 
 	/* Native Command Queuing */
 	[0x60] = { ATA_CMD_NCQ, STORAGE_READ, 0 }, /* READ FPDMA QUEUED */

@@ -71,7 +71,7 @@ struct process_data {
 	int running;
 	struct msgdsc_data msgdsc[NUM_OF_MSGDSC];
 	bool exitflag;
-	bool restrict;
+	bool setlimit;
 	int stacksize;
 };
 
@@ -134,18 +134,26 @@ sysenter_available (void)
 #endif
 
 static void
-setup_syscallentry (void)
+set_process64_msrs (void)
 {
 #ifdef __x86_64__
-	ulong efer;
-
-	asm_wrmsr (MSR_IA32_SYSENTER_CS, 0);	/* Disable SYSENTER/SYSEXIT */
 	asm_wrmsr32 (MSR_IA32_STAR, (u32) (ulong)syscall_entry_sysret64,
 		     (SEG_SEL_CODE32U << 16) | SEG_SEL_CODE64);
 	asm_wrmsr (MSR_IA32_LSTAR, (ulong)syscall_entry_sysret64);
 	asm_wrmsr (MSR_AMD_CSTAR, (ulong)syscall_entry_sysret64);
 	asm_wrmsr (MSR_IA32_FMASK,
 		   RFLAGS_VM_BIT | RFLAGS_IF_BIT | RFLAGS_RF_BIT);
+#endif
+}
+
+static void
+setup_syscallentry (void)
+{
+#ifdef __x86_64__
+	ulong efer;
+
+	asm_wrmsr (MSR_IA32_SYSENTER_CS, 0);	/* Disable SYSENTER/SYSEXIT */
+	set_process64_msrs ();
 	asm_rdmsr (MSR_IA32_EFER, &efer);
 	efer |= MSR_IA32_EFER_SCE_BIT;
 	asm_wrmsr (MSR_IA32_EFER, efer);
@@ -265,7 +273,7 @@ found:
 	process[pid].mm_phys = phys;
 	process[pid].running = 0;
 	process[pid].exitflag = false;
-	process[pid].restrict = false;
+	process[pid].setlimit = false;
 	process[pid].stacksize = PAGESIZE;
 	if (stacksize > PAGESIZE)
 		process[pid].stacksize = stacksize;
@@ -336,6 +344,26 @@ cleanup (int pid, phys_t mm_phys)
 	process[pid].valid = false;
 }
 
+static void
+release_process64_msrs (void *data)
+{
+}
+
+bool
+own_process64_msrs (void (*func) (void *data), void *data)
+{
+	struct pcpu *cpu = currentcpu;
+
+	if (cpu->release_process64_msrs == func &&
+	    cpu->release_process64_msrs_data == data)
+		return false;
+	if (cpu->release_process64_msrs)
+		cpu->release_process64_msrs (cpu->release_process64_msrs_data);
+	cpu->release_process64_msrs = func;
+	cpu->release_process64_msrs_data = data;
+	return true;
+}
+
 /* pid, func=pointer to the function of the process,
    sp=stack pointer of the process */
 /* process_lock must be locked */
@@ -355,6 +383,8 @@ call_msgfunc0 (int pid, void *func, ulong sp)
 	currentcpu->pid = pid;
 	process[pid].running++;
 	spinlock_unlock (&process_lock);
+	if (own_process64_msrs (release_process64_msrs, NULL))
+		set_process64_msrs ();
 	asm volatile (
 #ifdef __x86_64__
 		" pushq %%rbp \n"
@@ -458,7 +488,7 @@ call_msgfunc1 (int pid, int gen, int desc, void *arg, int len,
 		buf_user[i].premap_handle = 0;
 	}
 	stacksize = process[pid].stacksize;
-	sp2 = mm_process_map_stack (stacksize, process[pid].restrict, true);
+	sp2 = mm_process_map_stack (stacksize, process[pid].setlimit, true);
 	if (!sp2) {
 		printf ("cannot allocate stack for process\n");
 		goto mapfail;
@@ -524,7 +554,7 @@ msgsetfunc (int desc, void *func)
 ulong
 sys_msgsetfunc (ulong ip, ulong sp, ulong num, ulong si, ulong di)
 {
-	if (process[currentcpu->pid].restrict)
+	if (process[currentcpu->pid].setlimit)
 		return (ulong)-1L;
 	if (si >= 0 && si < NUM_OF_MSGDSC)
 		return (ulong)_msgsetfunc (currentcpu->pid, si, (void *)di);
@@ -572,7 +602,7 @@ sys_msgregister (ulong ip, ulong sp, ulong num, ulong si, ulong di)
 
 	if (!is_range_valid (si, MSG_NAMELEN))
 		return (ulong)-1L;
-	if (process[currentcpu->pid].restrict)
+	if (process[currentcpu->pid].setlimit)
 		return (ulong)-1L;
 	memcpy (name, (void *)si, MSG_NAMELEN);
 	name[MSG_NAMELEN - 1] = '\0';
@@ -605,7 +635,7 @@ sys_msgopen (ulong ip, ulong sp, ulong num, ulong si, ulong di)
 
 	if (!is_range_valid (si, MSG_NAMELEN))
 		return (ulong)-1L;
-	if (process[currentcpu->pid].restrict)
+	if (process[currentcpu->pid].setlimit)
 		return (ulong)-1L;
 	memcpy (name, (void *)si, MSG_NAMELEN);
 	name[MSG_NAMELEN - 1] = '\0';
@@ -725,7 +755,7 @@ msgsenddesc (int desc, int data)
 ulong
 sys_msgsenddesc (ulong ip, ulong sp, ulong num, ulong si, ulong di)
 {
-	if (process[currentcpu->pid].restrict)
+	if (process[currentcpu->pid].setlimit)
 		return (ulong)-1L;
 	return _msgsenddesc (currentcpu->pid, si, di);
 }
@@ -769,7 +799,7 @@ sys_newprocess (ulong ip, ulong sp, ulong num, ulong si, ulong di)
 {
 	char name[PROCESS_NAMELEN];
 
-	if (process[currentcpu->pid].restrict)
+	if (process[currentcpu->pid].setlimit)
 		return (ulong)-1L;
 	memcpy (name, (void *)si, PROCESS_NAMELEN);
 	name[PROCESS_NAMELEN - 1] = '\0';
@@ -879,13 +909,13 @@ sys_exitprocess (ulong ip, ulong sp, ulong num, ulong si, ulong di)
 
 /* si=stack size di=maximum stack size */
 static ulong
-sys_restrict (ulong ip, ulong sp, ulong num, ulong si, ulong di)
+sys_setlimit (ulong ip, ulong sp, ulong num, ulong si, ulong di)
 {
 	int r = -1;
 	virt_t tmp;
 
 	spinlock_lock (&process_lock);
-	if (process[currentcpu->pid].restrict)
+	if (process[currentcpu->pid].setlimit)
 		goto ret;
 	if (si < PAGESIZE)
 		si = PAGESIZE;
@@ -899,7 +929,7 @@ sys_restrict (ulong ip, ulong sp, ulong num, ulong si, ulong di)
 		spinlock_unlock (&process_lock);
 		panic ("unmap stack failed");
 	}
-	process[currentcpu->pid].restrict = true;
+	process[currentcpu->pid].setlimit = true;
 	process[currentcpu->pid].stacksize = si;
 ret:
 	spinlock_unlock (&process_lock);
@@ -994,8 +1024,8 @@ static syscall_func_t syscall_table[NUM_OF_SYSCALLS] = {
 	sys_msgsendbuf,
 	sys_msgunregister,
 	sys_exitprocess,
-	sys_restrict,
-    sys_getdbreg,       /* 15 */
+	sys_setlimit,
+	sys_getdbreg,       /* 15 */
 };
 
 __attribute__ ((regparm (1))) void
@@ -1005,6 +1035,8 @@ process_syscall (struct syscall_regs *regs)
 		regs->rax = syscall_table[regs->rbx] (regs->rdx, regs->rcx,
 						      regs->rbx, regs->rsi,
 						      regs->rdi);
+		if (own_process64_msrs (release_process64_msrs, NULL))
+			set_process64_msrs ();
 		return;
 	}
 	printf ("Bad system call.\n");

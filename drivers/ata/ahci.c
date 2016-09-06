@@ -41,6 +41,9 @@
 
 #define NUM_OF_AHCI_PORTS	32
 #define PxCMD_ST_BIT		1
+#define PxCMD_FRE_BIT		0x10
+#define PxCMD_FR_BIT		0x4000
+#define PxCMD_CR_BIT		0x8000
 #define PxSSTS_DET_MASK		0xF
 #define PxSSTS_DET_MASK_NODEV	0x0
 #define NUM_OF_COMMAND_HEADER	32
@@ -174,7 +177,6 @@ struct ahci_hook {
 	void *map;
 	uint maplen;
 	phys_t mapaddr;
-	u32 a, b;
 	u32 iobase;
 	struct ahci_data *ad;
 };
@@ -265,6 +267,7 @@ struct ahci_command_data {
 		u32 pxci, pxci2;
 		u32 pxis, pxie;
 		u32 queued;
+		u32 pxcmd;
 		void *fis;
 	} port[NUM_OF_AHCI_PORTS];
 };
@@ -308,6 +311,7 @@ ahci_read (struct ahci_data *ad, u32 offset)
 
 	p = ad->ahci_mem.map;
 	p += offset;
+	asm ("" : : : "memory");
 	return *(u32 *)p;
 }
 
@@ -319,6 +323,7 @@ ahci_write (struct ahci_data *ad, u32 offset, u32 data)
 	p = ad->ahci_mem.map;
 	p += offset;
 	*(u32 *)p = data;
+	asm ("" : : : "memory");
 }
 
 static void
@@ -326,12 +331,14 @@ ahci_readwrite (struct ahci_data *ad, u32 offset, bool wr, void *buf, uint len)
 {
 	u8 *p;
 
+	asm ("" : : : "memory");
 	p = ad->ahci_mem.map;
 	p += offset;
 	if (wr)
 		memcpy (p, buf, len);
 	else
 		memcpy (buf, p, len);
+	asm ("" : : : "memory");
 }
 
 static u32
@@ -566,6 +573,17 @@ ahci_unlock (struct ahci_data *ad)
 	spinlock_unlock (&ad->locked_lock);
 }
 
+static int
+wait_for_pxcmd (struct ahci_data *ad, int port_num, u32 mask, u32 value)
+{
+	int i;
+
+	for (i = 1500000; i > 0; i--)
+		if ((ahci_port_read (ad, port_num, PxCMD) & mask) == value)
+			break;
+	return i;
+}
+
 /************************************************************/
 /* Initialize */
 
@@ -573,6 +591,7 @@ static void
 ahci_port_data_init (struct ahci_data *ad, int port_num)
 {
 	int i;
+	u32 pxcmd;
 	void *virt;
 	phys_t phys;
 	struct ahci_port *port;
@@ -592,10 +611,26 @@ ahci_port_data_init (struct ahci_data *ad, int port_num)
 	port->storage_device = storage_new (STORAGE_TYPE_AHCI, ad->host_id,
 					    port_num, NULL, NULL);
 	port->atapi = false;
+	/* PxCMD.ST should be cleared when PxCLB and PxCLBU are
+	 * changed.  PxCLB and PxCLBU are written in mmhandler2() when
+	 * PxCMD.ST is changed from 0 to 1. */
 	port->clb = ahci_port_read (ad, port_num, PxCLB);
 	port->clbu = ahci_port_read (ad, port_num, PxCLBU);
-	ahci_port_write (ad, port_num, PxCLB, port->myclb);
-	ahci_port_write (ad, port_num, PxCLBU, port->myclbu);
+	pxcmd = ahci_port_read (ad, port_num, PxCMD);
+	if (pxcmd & PxCMD_ST_BIT) {
+		ahci_port_write (ad, port_num, PxCMD, pxcmd & ~PxCMD_ST_BIT);
+		/* PxCMD.CR should be cleared by hardware after
+		 * clearing PxCMD.ST. */
+		if (!wait_for_pxcmd (ad, port_num, PxCMD_CR_BIT, 0))
+			printf ("AHCI %d:%d warning: PxCMD.CR=1\n",
+				ad->host_id, port_num);
+		ahci_port_write (ad, port_num, PxCLB, port->myclb);
+		ahci_port_write (ad, port_num, PxCLBU, port->myclbu);
+		ahci_port_write (ad, port_num, PxCMD, pxcmd);
+		if (!wait_for_pxcmd (ad, port_num, PxCMD_CR_BIT, PxCMD_CR_BIT))
+			printf ("AHCI %d:%d warning: PxCMD.CR=0\n",
+				ad->host_id, port_num);
+	}
 	printf ("AHCI %d:%d initialized\n", ad->host_id, port_num);
 }
 
@@ -934,7 +969,7 @@ ahci_cmd_start (struct ahci_data *ad, struct ahci_port *pt, u32 pxci)
 			cmdtbl = mapmem_gphys (ctphys, cmdtbl_size (prdtl),
 					       MAPMEM_WRITE);
 			totalsize = ahci_get_dmalen (cmdtbl, prdtl, &intrflag);
-			ASSERT (totalsize < 4 * 1024 * 1024);
+			ASSERT (totalsize <= 4 * 1024 * 1024);
 			if (pt->my[i].dmabuf != NULL)
 				panic ("pt->my[i].dmabuf=%p is not NULL!",
 				       pt->my[i].dmabuf);
@@ -1051,9 +1086,26 @@ mmhandler2 (struct ahci_data *ad, u32 offset, bool wr, u32 *buf32, uint len,
 				pxcmd = ahci_port_read (ad, port_num, PxCMD);
 				if (pxcmd & PxCMD_ST_BIT)
 					ahci_cmd_cancel (port);
+			} else if (*buf32 & PxCMD_ST_BIT) {
+				pxcmd = ahci_port_read (ad, port_num, PxCMD);
+				if (!(pxcmd & PxCMD_ST_BIT)) {
+					ahci_port_write (ad, port_num, PxCLB,
+							 port->myclb);
+					ahci_port_write (ad, port_num, PxCLBU,
+							 port->myclbu);
+				}
 			}
 		}
+		if (port && ahci_port_eq (port_off, len, PxSACT)) {
+			/* Handling PxSACT is necessary because PxSACT
+			 * is cleared when PxCMD.ST is cleared in the
+			 * ahci_port_data_init(). */
+			if (!port->storage_device)
+				ahci_port_data_init (ad, port_num);
+		}
 		if (port && ahci_port_eq (port_off, len, PxCI)) {
+			if (!port->storage_device)
+				ahci_port_data_init (ad, port_num);
 			/* PxCI is written before PxCMD.ST is set to 1
 			   in some BIOSes */
 			ASSERT (port->storage_device);
@@ -1067,10 +1119,18 @@ mmhandler2 (struct ahci_data *ad, u32 offset, bool wr, u32 *buf32, uint len,
 	} else {
 		/* Read */
 		if (port && ahci_port_eq (port_off, len, PxCLB)) {
+			/* port->clb is initialized in the
+			 * ahci_port_data_init(). */
+			if (!port->storage_device)
+				ahci_port_data_init (ad, port_num);
 			*buf32 = port->clb;
 			return;
 		}
 		if (port && ahci_port_eq (port_off, len, PxCLBU)) {
+			/* port->clbu is initialized in the
+			 * ahci_port_data_init(). */
+			if (!port->storage_device)
+				ahci_port_data_init (ad, port_num);
 			*buf32 = port->clbu;
 			return;
 		}
@@ -1256,6 +1316,21 @@ found:
 			data->port[pno].fis = NULL;
 			goto mix_with_guest;
 		}
+		data->port[pno].pxcmd = ahci_port_read (ad, pno, PxCMD);
+		if (data->port[pno].pxcmd & PxCMD_ST_BIT) {
+			ahci_port_write (ad, pno, PxCMD, data->port[pno].pxcmd
+					 & ~PxCMD_ST_BIT);
+			if (!wait_for_pxcmd (ad, pno, PxCMD_CR_BIT, 0))
+				printf ("AHCI %d:%d warning: PxCMD.CR=1\n",
+					ad->host_id, pno);
+		}
+		if (data->port[pno].pxcmd & PxCMD_FRE_BIT) {
+			ahci_port_write (ad, pno, PxCMD, data->port[pno].pxcmd
+					 & ~PxCMD_ST_BIT & ~PxCMD_FRE_BIT);
+			if (!wait_for_pxcmd (ad, pno, PxCMD_FR_BIT, 0))
+				printf ("AHCI %d:%d warning: PxCMD.FR=1\n",
+					ad->host_id, pno);
+		}
 		data->port[pno].orig_fb = ahci_port_read (ad, pno, PxFB);
 		data->port[pno].orig_fbu = ahci_port_read (ad, pno, PxFBU);
 		alloc_page (&data->port[pno].fis, &phys);
@@ -1263,6 +1338,17 @@ found:
 		pxfbu = phys >> 32;
 		ahci_port_write (ad, pno, PxFB, pxfb);
 		ahci_port_write (ad, pno, PxFBU, pxfbu);
+		ahci_port_write (ad, pno, PxCMD, (data->port[pno].pxcmd
+						  & ~PxCMD_ST_BIT)
+				 | PxCMD_FRE_BIT);
+		if (!wait_for_pxcmd (ad, pno, PxCMD_FR_BIT, PxCMD_FR_BIT))
+			printf ("AHCI %d:%d warning: PxCMD.FR=0\n",
+				ad->host_id, pno);
+		ahci_port_write (ad, pno, PxCMD, data->port[pno].pxcmd
+				 | PxCMD_ST_BIT | PxCMD_FRE_BIT);
+		if (!wait_for_pxcmd (ad, pno, PxCMD_CR_BIT, PxCMD_CR_BIT))
+			printf ("AHCI %d:%d warning: PxCMD.CR=0\n",
+				ad->host_id, pno);
 		data->port[pno].pxis = ahci_port_read (ad, pno, PxIS);
 	mix_with_guest:
 		data->port[pno].pxie = ahci_port_read (ad, pno, PxIE);
@@ -1282,7 +1368,7 @@ found:
 
 static bool
 ahci_command_completion (struct ahci_data *ad, struct ahci_command_list *p,
-			 struct ahci_command_data *data, u32 time)
+			 struct ahci_command_data *data, u64 time)
 {
 	struct recvfis *fis;
 	struct storage_hc_dev_atacmd *cmd;
@@ -1333,11 +1419,38 @@ ahci_command_completion (struct ahci_data *ad, struct ahci_command_list *p,
 	if (!--data->port[pno].queued) {
 		if (!data->port[pno].fis)
 			goto mix_with_guest;
+		ahci_port_write (ad, pno, PxCMD, (data->port[pno].pxcmd
+						  & ~PxCMD_ST_BIT)
+				 | PxCMD_FRE_BIT);
+		if (!wait_for_pxcmd (ad, pno, PxCMD_CR_BIT, 0))
+			printf ("AHCI %d:%d warning: PxCMD.CR=1\n",
+				ad->host_id, pno);
+		ahci_port_write (ad, pno, PxCMD, data->port[pno].pxcmd
+				 & ~PxCMD_ST_BIT & ~PxCMD_FRE_BIT);
+		if (!wait_for_pxcmd (ad, pno, PxCMD_FR_BIT, 0))
+			printf ("AHCI %d:%d warning: PxCMD.FR=1\n",
+				ad->host_id, pno);
 		pxis1 = ahci_port_read (ad, pno, PxIS) & ~data->port[pno].pxis;
 		if (pxis1)
 			ahci_port_write (ad, pno, PxIS, pxis1);
 		ahci_port_write (ad, pno, PxFB, data->port[pno].orig_fb);
 		ahci_port_write (ad, pno, PxFBU, data->port[pno].orig_fbu);
+		if (data->port[pno].pxcmd & PxCMD_FRE_BIT) {
+			ahci_port_write (ad, pno, PxCMD, data->port[pno].pxcmd
+					 & ~PxCMD_ST_BIT);
+			if (!wait_for_pxcmd (ad, pno, PxCMD_FR_BIT,
+					     PxCMD_FR_BIT))
+				printf ("AHCI %d:%d warning: PxCMD.FR=0\n",
+					ad->host_id, pno);
+		}
+		if (data->port[pno].pxcmd & PxCMD_ST_BIT) {
+			ahci_port_write (ad, pno, PxCMD,
+					 data->port[pno].pxcmd);
+			if (!wait_for_pxcmd (ad, pno, PxCMD_CR_BIT,
+					     PxCMD_CR_BIT))
+				printf ("AHCI %d:%d warning: PxCMD.CR=0\n",
+					ad->host_id, pno);
+		}
 		free_page (data->port[pno].fis);
 	mix_with_guest:
 		ahci_port_write (ad, pno, PxIE, data->port[pno].pxie);
@@ -1532,60 +1645,39 @@ unreghook (struct ahci_hook *d)
 	}
 }
 
-static u32
-getnum (u32 b)
-{
-	u32 r;
-
-	for (r = 1; !(b & 1); b >>= 1)
-		r <<= 1;
-	return r;
-}
-
 static void
-reghook (struct ahci_hook *d, int i, int off, u32 a, u32 b, enum hooktype ht)
+reghook (struct ahci_hook *d, int i, int off, struct pci_bar_info *bar,
+	 enum hooktype ht)
 {
-	u32 num;
-
-	if (d->e && d->mapaddr == (a & PCI_CONFIG_BASE_ADDRESS_MEMMASK))
+	if (bar->type == PCI_BAR_INFO_TYPE_NONE)
 		return;
 	unreghook (d);
 	d->i = i;
 	d->e = 0;
-	d->a = a;
-	d->b = b;
-	if (a == 0)		/* FIXME: is ignoring zero correct? */
-		return;
-	if ((a & PCI_CONFIG_BASE_ADDRESS_SPACEMASK) ==
-	    PCI_CONFIG_BASE_ADDRESS_IOSPACE) {
+	if (bar->type == PCI_BAR_INFO_TYPE_IO) {
 		if (ht == HOOK_MEMSPACE)
 			return;
-		a &= PCI_CONFIG_BASE_ADDRESS_IOMASK;
-		b &= PCI_CONFIG_BASE_ADDRESS_IOMASK;
-		num = getnum (b);
-		if (num < off + 8)
+		if (bar->len < off + 8)
 			return;
 		d->io = 1;
-		d->iobase = a + off;
-		d->hd = core_io_register_handler (a + off, 8, iohandler, d,
+		d->iobase = bar->base + off;
+		d->hd = core_io_register_handler (bar->base + off, 8,
+						  iohandler, d,
 						  CORE_IO_PRIO_EXCLUSIVE,
 						  driver_name);
 	} else {
 		if (ht == HOOK_IOSPACE)
 			return;
-		a &= PCI_CONFIG_BASE_ADDRESS_MEMMASK;
-		b &= PCI_CONFIG_BASE_ADDRESS_MEMMASK;
-		num = getnum (b);
-		if (num < 0x180)
+		if (bar->len < 0x180)
 			/* The memory space is too small for AHCI */
 			return;
-		d->mapaddr = a;
-		d->maplen = num;
-		d->map = mapmem_gphys (a, num, MAPMEM_WRITE);
+		d->mapaddr = bar->base;
+		d->maplen = bar->len;
+		d->map = mapmem_gphys (bar->base, bar->len, MAPMEM_WRITE);
 		if (!d->map)
 			panic ("mapmem failed");
 		d->io = 0;
-		d->h = mmio_register (a, num, mmhandler, d);
+		d->h = mmio_register (bar->base, bar->len, mmhandler, d);
 		if (!d->h)
 			panic ("mmio_register failed");
 	}
@@ -1620,6 +1712,7 @@ read_satacap (struct ahci_data *ad, struct pci_device *pci_device)
 		} f;
 	} satacr1;
 	pci_config_address_t addr;
+	struct pci_bar_info bar_info;
 
 	addr = pci_device->address;
 	addr.reg_no = 0x34 >> 2; /* CAP - Capabilities Pointer */
@@ -1648,9 +1741,9 @@ found:
 		i = satacr1.f.barloc - 0x4;
 		ad->idp_offset = satacr1.f.barofst << 2;
 		ad->idp_config = 0x10 + (i << 2);
-		reghook (&ad->ahci_io, i, ad->idp_offset,
-			 pci_device->config_space.base_address[i],
-			 pci_device->base_address_mask[i], HOOK_IOSPACE);
+		pci_get_bar_info (pci_device, i, &bar_info);
+		reghook (&ad->ahci_io, i, ad->idp_offset, &bar_info,
+			 HOOK_IOSPACE);
 		break;
 	case 0xF:
 		ad->idp_config = cap + 8;
@@ -1666,6 +1759,7 @@ ahci_new (struct pci_device *pci_device)
 {
 	int i;
 	struct ahci_data *ad;
+	struct pci_bar_info bar_info;
 
 	ad = alloc (sizeof *ad);
 	memset (ad, 0, sizeof *ad);
@@ -1675,8 +1769,8 @@ ahci_new (struct pci_device *pci_device)
 	STORAGE_HC_ADDR_PCI (ad->hc_addr.addr, pci_device);
 	ad->hc_addr.type = STORAGE_HC_TYPE_AHCI;
 	LIST2_HEAD_INIT (ad->ahci_cmd_list, list);
-	reghook (&ad->ahci_mem, 5, 0, pci_device->config_space.base_address[5],
-		 pci_device->base_address_mask[5], HOOK_MEMSPACE);
+	pci_get_bar_info (pci_device, 5, &bar_info);
+	reghook (&ad->ahci_mem, 5, 0, &bar_info, HOOK_MEMSPACE);
 	if (!ahci_probe (ad, false, 0)) {
 		unreghook (&ad->ahci_mem);
 		free (ad);
@@ -1696,17 +1790,17 @@ ahci_new (struct pci_device *pci_device)
 
 bool
 ahci_config_read (void *ahci_data, struct pci_device *pci_device,
-		  core_io_t io, u8 offset, union mem *data)
+		  u8 iosize, u16 offset, union mem *data)
 {
 	struct ahci_data *ad = ahci_data;
 
 	if (!ahci_data)
 		return false;
 	if (ad->idp_config >= 0x40 &&
-	    offset + io.size - 1 >= ad->idp_config &&
+	    offset + iosize - 1 >= ad->idp_config &&
 	    offset < ad->idp_config + 8) {
 		idphandler (ad, offset - ad->idp_config, false, &data->dword,
-			    io.size);
+			    iosize);
 		return true;
 	}
 	return false;
@@ -1714,40 +1808,30 @@ ahci_config_read (void *ahci_data, struct pci_device *pci_device,
 
 bool
 ahci_config_write (void *ahci_data, struct pci_device *pci_device,
-		   core_io_t io, u8 offset, union mem *data)
+		   u8 iosize, u16 offset, union mem *data)
 {
 	struct ahci_data *ad = ahci_data;
-	u32 tmp;
+	struct pci_bar_info bar_info;
 	int i;
 
 	if (!ahci_data)
 		return false;
 	if (ad->idp_config >= 0x40 &&
-	    offset + io.size - 1 >= ad->idp_config &&
+	    offset + iosize - 1 >= ad->idp_config &&
 	    offset < ad->idp_config + 8) {
 		idphandler (ad, offset - ad->idp_config, true, &data->dword,
-			    io.size);
+			    iosize);
 		return true;
-	} else if (offset + io.size - 1 >= 0x10 && offset < 0x28) {
-		if ((offset & 3) || io.size != 4)
-			panic ("%s: io:%08x, offset=%02x, data:%08x\n",
-			       __func__, *(int*)&io, offset, data->dword);
-		i = (offset - 0x10) >> 2;
-		ASSERT (i >= 0 && i < 6);
-		tmp = pci_device->base_address_mask[i];
-		if ((tmp & PCI_CONFIG_BASE_ADDRESS_SPACEMASK) ==
-		    PCI_CONFIG_BASE_ADDRESS_IOSPACE)
-			tmp &= data->dword | 3;
-		else
-			tmp &= data->dword | 0xF;
-		if (offset == ad->idp_config)
-			reghook (&ad->ahci_io, i, ad->idp_offset, tmp,
-				 pci_device->base_address_mask[i],
-				 HOOK_IOSPACE);
+	}
+	i = pci_get_modifying_bar_info (pci_device, &bar_info, iosize, offset,
+					data);
+	if (i >= 0) {
 		if (i == 5)
-			reghook (&ad->ahci_mem, i, 0, tmp,
-				 pci_device->base_address_mask[i],
+			reghook (&ad->ahci_mem, 5, 0, &bar_info,
 				 HOOK_MEMSPACE);
+		if (offset == ad->idp_config)
+			reghook (&ad->ahci_io, i, ad->idp_offset, &bar_info,
+				 HOOK_IOSPACE);
 	}
 	return false;
 }

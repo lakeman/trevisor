@@ -49,10 +49,10 @@ struct vga_func_data {
 };
 
 static void vga_intel_new (struct pci_device *pci_device);
-static int vga_intel_config_read (struct pci_device *pci_device, core_io_t io,
-				  u8 offset, union mem *data);
-static int vga_intel_config_write (struct pci_device *pci_device, core_io_t io,
-				   u8 offset, union mem *data);
+static int vga_intel_config_read (struct pci_device *pci_device, u8 iosize,
+				  u16 offset, union mem *data);
+static int vga_intel_config_write (struct pci_device *pci_device, u8 iosize,
+				   u16 offset, union mem *data);
 static int vga_intel_is_ready (struct vga_func_data *data);
 static int vga_intel_transfer_image (struct vga_func_data *data,
 				     enum vga_func_transfer_dir dir,
@@ -69,10 +69,9 @@ static int vga_intel_get_screen_size (struct vga_func_data *data,
 				      unsigned int *height);
 
 static struct pci_driver vga_intel_driver = {
-	.name		= "vga_intel_driver",
+	.name		= "vga_intel",
 	.longname	= "Intel VGA controller driver",
-	.id		= { 0x00008086, 0x0000FFFF },
-	.class		= { 0x030000, 0xFFFFFF },
+	.device		= "id=8086:*, class_code=030000",
 	.new		= vga_intel_new,
 	.config_read	= vga_intel_config_read,
 	.config_write	= vga_intel_config_write,
@@ -85,44 +84,23 @@ static struct vga_func vga_intel_func = {
 	.get_screen_size = vga_intel_get_screen_size,
 };
 
-static u32
-getnum (u32 b)
-{
-	u32 r;
-
-	for (r = 1; !(b & 1); b >>= 1)
-		r <<= 1;
-	return r;
-}
-
 static void
 vga_intel_new (struct pci_device *pci_device)
 {
 	struct vga_func_data *d;
+	struct pci_bar_info bar0, bar2;
 
-	if ((pci_device->config_space.base_address[0] &
-	     PCI_CONFIG_BASE_ADDRESS_SPACEMASK) !=
-	    PCI_CONFIG_BASE_ADDRESS_MEMSPACE)
+	pci_get_bar_info (pci_device, 0, &bar0);
+	pci_get_bar_info (pci_device, 2, &bar2);
+	if (bar0.type != PCI_BAR_INFO_TYPE_MEM)
 		return;
-	if ((pci_device->config_space.base_address[2] &
-	     PCI_CONFIG_BASE_ADDRESS_SPACEMASK) !=
-	    PCI_CONFIG_BASE_ADDRESS_MEMSPACE)
-		return;
-	if (!(pci_device->base_address_mask[0] &
-	      PCI_CONFIG_BASE_ADDRESS_MEMMASK))
-		return;
-	if (!(pci_device->base_address_mask[2] &
-	      PCI_CONFIG_BASE_ADDRESS_MEMMASK))
+	if (bar2.type != PCI_BAR_INFO_TYPE_MEM)
 		return;
 	d = alloc (sizeof *d);
-	d->reg_base = pci_device->config_space.base_address[0] &
-		PCI_CONFIG_BASE_ADDRESS_MEMMASK;
-	d->reg_len = getnum (pci_device->base_address_mask[0] &
-			     PCI_CONFIG_BASE_ADDRESS_MEMMASK);
-	d->vram_base = pci_device->config_space.base_address[2] &
-		PCI_CONFIG_BASE_ADDRESS_MEMMASK;
-	d->vram_len = getnum (pci_device->base_address_mask[2] &
-			      PCI_CONFIG_BASE_ADDRESS_MEMMASK);
+	d->reg_base = bar0.base;
+	d->reg_len = bar0.len;
+	d->vram_base = bar2.base;
+	d->vram_len = bar2.len;
 	d->reg = NULL;
 	d->vram = NULL;
 	d->ready = false;
@@ -133,6 +111,7 @@ vga_intel_new (struct pci_device *pci_device)
 		d->swap64_line = 0x96;
 		break;
 	case 0x0126:		/* X220 */
+	case 0x0046:		/* CF-J9 */
 		d->swap64_line = 0x66;
 		break;
 	}
@@ -142,37 +121,26 @@ vga_intel_new (struct pci_device *pci_device)
 }
 
 static int
-vga_intel_config_read (struct pci_device *pci_device, core_io_t io, u8 offset,
+vga_intel_config_read (struct pci_device *pci_device, u8 iosize, u16 offset,
 		       union mem *data)
 {
 	return CORE_IO_RET_DEFAULT;
 }
 
 static int
-vga_intel_config_write (struct pci_device *pci_device, core_io_t io, u8 offset,
+vga_intel_config_write (struct pci_device *pci_device, u8 iosize, u16 offset,
 			union mem *data)
 {
 	struct vga_func_data *d = pci_device->host;
-	u32 tmp;
+	struct pci_bar_info bar_info;
 	int i;
 
-	if (offset + io.size - 1 >= 0x10 && offset <= 0x24) {
-		if ((offset & 3) || io.size != 4)
-			panic ("%s: io:%08x, offset=%02x, data:%08x\n",
-			       __func__, *(int *)&io, offset, data->dword);
-		i = (offset - 0x10) >> 2;
-		ASSERT (i >= 0 && i < 6);
-		tmp = pci_device->base_address_mask[i];
-		if ((tmp & PCI_CONFIG_BASE_ADDRESS_SPACEMASK) ==
-		    PCI_CONFIG_BASE_ADDRESS_IOSPACE)
-			tmp &= data->dword | 3;
-		else
-			tmp &= data->dword | 0xF;
-		if (i == 0)
-			d->reg_base = tmp & PCI_CONFIG_BASE_ADDRESS_MEMMASK;
-		else if (i == 2)
-			d->vram_base = tmp & PCI_CONFIG_BASE_ADDRESS_MEMMASK;
-	}
+	i = pci_get_modifying_bar_info (pci_device, &bar_info, iosize, offset,
+					data);
+	if (i == 0)
+		d->reg_base = bar_info.base;
+	else if (i == 2)
+		d->vram_base = bar_info.base;
 	return CORE_IO_RET_DEFAULT;
 }
 

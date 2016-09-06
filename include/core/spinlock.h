@@ -37,6 +37,9 @@
 
 typedef u8 spinlock_t;
 typedef u32 rw_spinlock_t;
+typedef struct {
+	u32 next_ticket, now_serving;
+} ticketlock_t;
 
 #define SPINLOCK_INITIALIZER ((spinlock_t)0)
 
@@ -64,7 +67,7 @@ spinlock_lock (spinlock_t *l)
 #else
 		      : "=abcd" (dummy)
 #endif
-		      , "=m" (*l)
+		      , "+m" (*l)
 		      : "0" ((u8)1)
 		      : "cc");
 }
@@ -101,7 +104,7 @@ spinlock_lock_debug (spinlock_t *l, char *msg)
 #else
 		      : "=abd" (dummy)
 #endif
-		      , "=m" (*l)
+		      , "+m" (*l)
 		      , "=c" (c)
 		      : "0" ((u8)1)
 		      , "2" (0xFFFFFFFF)
@@ -122,7 +125,7 @@ spinlock_unlock (spinlock_t *l)
 #else
 		      : "=abcd" (dummy)
 #endif
-		      , "=m" (*l)
+		      , "+m" (*l)
 		      : "0" ((u8)0));
 }
 
@@ -142,7 +145,7 @@ rw_spinlock_lock_sh (rw_spinlock_t *l)
 		      "      cmpl %1, %0 \n" /* test a sign */
 		      "      js   2b \n" /* if negative, do spin loop */
 		      "1: \n"
-		      : "=m" (*l)
+		      : "+m" (*l)
 		      : "ri" ((rw_spinlock_t)0)
 		      , "ri" ((rw_spinlock_t)1)
 		      : "cc");
@@ -152,7 +155,7 @@ static inline void
 rw_spinlock_unlock_sh (rw_spinlock_t *l)
 {
 	asm volatile ("lock subl %1, %0"
-		      : "=m" (*l)
+		      : "+m" (*l)
 		      : "ri" ((rw_spinlock_t)1)
 		      : "cc");
 }
@@ -168,17 +171,33 @@ rw_spinlock_lock_ex (rw_spinlock_t *l)
 		      " lock cmpxchgl %2, %0 \n" /* if *l==0, *l=0x80000000 */
 		      "      jne      2b \n" /* else do spin loop */
 		      "1: \n"
-		      : "=m" (*l)
+		      : "+m" (*l)
 		      : "a" (0)
 		      , "r" (0x80000000)
 		      : "cc");
+}
+
+/* return value 0: lock succeeded */
+static inline rw_spinlock_t
+rw_spinlock_trylock_ex (rw_spinlock_t *l)
+{
+	rw_spinlock_t ret;
+
+	/* if (*l==(ret=0)) *l=0x80000000; else ret=*l; */
+	asm volatile ("lock cmpxchgl %2, %0"
+		      : "+m" (*l)
+		      , "=&a" (ret)
+		      : "r" (0x80000000)
+		      , "1" (0)
+		      : "cc");
+	return ret;
 }
 
 static inline void
 rw_spinlock_unlock_ex (rw_spinlock_t *l)
 {
 	asm volatile ("lock andl %1,%0"
-		      : "=m" (*l)
+		      : "+m" (*l)
 		      : "ri" ((rw_spinlock_t)0x7FFFFFFF)
 		      : "cc");
 }
@@ -187,6 +206,50 @@ static inline void
 rw_spinlock_init (rw_spinlock_t *l)
 {
 	*l = 0;
+}
+
+static inline void
+ticketlock_lock (ticketlock_t *l)
+{
+	u32 ticket;
+
+	asm volatile (" lock cmpxchgl %1, %0 \n" /* a=next */
+		      "      mov      %1, %2 \n" /* r=a */
+		      "1: \n"
+		      "      add      $1, %2 \n" /* r++ */
+		      " lock cmpxchgl %2, %0 \n" /* if next==a then next=r; */
+		      "      mov      %1, %2 \n" /* r=a */
+		      "      je       1f \n"	 /* ;goto 1f */
+		      "      pause \n"		 /* spin loop hint */
+		      "      jmp 1b \n"		 /* do spin loop */
+		      "1: \n"
+		      " lock cmpxchgl %1, %3 \n" /* if now==a */
+		      "      je       1f \n"	 /* then return */
+		      "      mov      %2, %1 \n" /* a=r */
+		      "      pause \n"		 /* spin loop hint */
+		      "      jmp 1b \n"		 /* do spin loop */
+		      "1: \n"
+		      : "+m" (l->next_ticket)
+		      , "=&a" (ticket)
+		      , "=&r" (ticket)
+		      : "m" (l->now_serving)
+		      : "cc");
+}
+
+static inline void
+ticketlock_unlock (ticketlock_t *l)
+{
+	asm volatile ("lock addl $1, %0"
+		      : "+m" (l->now_serving)
+		      :
+		      : "cc");
+}
+
+static inline void
+ticketlock_init (ticketlock_t *l)
+{
+	l->next_ticket = 0;
+	l->now_serving = 0;
 }
 
 #endif

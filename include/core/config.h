@@ -98,6 +98,7 @@ struct config_data_vpn {
 	char vpnCaCertV4[4096];
 	char vpnRsaKeyV4[4096];
 	char vpnSpecifyIssuerV4[8];
+	char vpnPhase1ModeV4[16];
 	char vpnPhase1CryptoV4[16];
 	char vpnPhase1HashV4[16];
 	char vpnPhase1LifeSecondsV4[16];
@@ -133,6 +134,7 @@ struct config_data_vpn {
 	char vpnCaCertV6[4096];
 	char vpnRsaKeyV6[4096];
 	char vpnSpecifyIssuerV6[8];
+	char vpnPhase1ModeV6[16];
 	char vpnPhase1CryptoV6[16];
 	char vpnPhase1HashV6[16];
 	char vpnPhase1LifeSecondsV6[16];
@@ -193,8 +195,10 @@ struct config_data_vmm_driver {
 	int concealEHCI;
 	int conceal1394;
 	int concealPRO1000;
+	int vga_intel;
 	struct config_data_vmm_driver_vpn vpn;
 	char pci_conceal[1024];
+	char pci[2048];
 };
 
 struct config_data_vmm_iccard {
@@ -202,27 +206,47 @@ struct config_data_vmm_iccard {
 	int status;
 };
 
+struct config_data_vmm_tty_syslog {
+	int enable;
+	u8 src_ipaddr[4];
+	u8 dst_ipaddr[4];
+};
+
+struct config_data_ip {
+	u8 ipaddr[4];
+	u8 netmask[4];
+	u8 gateway[4];
+	int use_dhcp;
+};
+
 struct config_data_vmm {
 	char randomSeed[1024];
 	int f11panic;
 	int f12msg;
 	int auto_reboot;
+	int panic_reboot;
 	int shell;
 	int dbgsh;
 	int status;
 	int boot_active;
+	int no_intr_intercept;
+	int ignore_tsc_invariant;
+	int unsafe_nested_virtualization;
+	char tty_mac_address[6];
 	int tty_pro1000;
-	char tty_pro1000_mac_address[6];
 	int tty_rtl8169;
-	char tty_rtl8169_mac_address[6];
+	int tty_x540;
+	int tty_ieee1394;
 	struct config_data_vmm_driver driver;
 	struct config_data_vmm_iccard iccard;
+	struct config_data_vmm_tty_syslog tty_syslog;
 };
 
 struct config_data {
 	int len;
 	struct config_data_idman idman;
 	struct config_data_vpn vpn;
+	struct config_data_ip ip;
 	struct config_data_storage storage;
 	struct config_data_vmm vmm;
 } __attribute__ ((packed));

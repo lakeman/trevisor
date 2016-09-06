@@ -43,9 +43,6 @@
 #include "vmmerr.h"
 
 static int memdump, memfree;
-#ifdef FWDBG
-char *dbgpage;
-#endif
 
 enum memdump_type {
 	MEMDUMP_GPHYS,
@@ -78,21 +75,7 @@ struct memdump_gvirt_data {
 	char *errbuf;
 };
 
-void
-debug_addstr (char *str)
-{
-#ifdef FWDBG
-	unsigned int len, slen;
-
-	len = strlen (dbgpage);
-	slen = strlen (str);
-	if (len + slen >= PAGESIZE)
-		panic ("debug_addstr: too long");
-	memcpy (&dbgpage[len], str, slen + 1);
-#endif
-}
-
-static void
+static asmlinkage void
 memdump_gphys (void *data)
 {
 	struct memdump_gphys_data *d;
@@ -103,7 +86,7 @@ memdump_gphys (void *data)
 		read_gphys_b (d->physaddr + i, &d->q[i], 0);
 }
 
-static void
+static asmlinkage void
 memdump_hvirt (void *data)
 {
 	struct memdump_hvirt_data *d;
@@ -112,7 +95,7 @@ memdump_hvirt (void *data)
 	memcpy (d->q, d->p, d->sendlen);
 }
 
-static void
+static asmlinkage void
 memdump_gvirt (void *data)
 {
 	struct memdump_gvirt_data *dd;

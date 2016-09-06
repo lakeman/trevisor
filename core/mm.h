@@ -62,9 +62,14 @@ typedef struct {
 	enum pmap_type type;
 } pmap_t;
 
+struct uefi_mmio_space_struct {
+	u64 base, npages;
+};
+
 extern u16 e801_fake_ax, e801_fake_bx;
 extern bool use_pae;
 extern u64 memorysize, vmmsize;
+extern struct uefi_mmio_space_struct *uefi_mmio_space;
 
 phys_t sym_to_phys (void *sym);
 bool phys_in_vmm (u64 phys);
@@ -74,6 +79,10 @@ u32 getsysmemmap (u32 n, u64 *base, u64 *len, u32 *type);
 u32 getfakesysmemmap (u32 n, u64 *base, u64 *len, u32 *type);
 void mm_flush_wb_cache (void);
 void mm_force_unlock (void);
+void __attribute__ ((section (".entry.text")))
+uefi_init_get_vmmsize (u32 *vmmsize, u32 *align);
+void *mm_get_panicmem (int *len);
+void mm_free_panicmem (void);
 
 /* process */
 int mm_process_alloc (phys_t *phys);

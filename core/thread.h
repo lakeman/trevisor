@@ -32,6 +32,8 @@
 
 #include <core/thread.h>
 
-void thread_set_process_switch (phys_t switchto);
+struct thread_pcpu_data {
+	tid_t tid;
+};
 
 #endif

@@ -172,16 +172,16 @@ vt_read_control_reg (enum control_reg reg, ulong *val)
 {
 	switch (reg) {
 	case CONTROL_REG_CR0:
-		asm_vmread (VMCS_CR0_READ_SHADOW, val);
+		*val = vt_read_cr0 ();
 		break;
 	case CONTROL_REG_CR2:
 		*val = current->u.vt.vr.cr2;
 		break;
 	case CONTROL_REG_CR3:
-		*val = current->u.vt.vr.cr3;
+		*val = vt_read_cr3 ();
 		break;
 	case CONTROL_REG_CR4:
-		asm_vmread (VMCS_CR4_READ_SHADOW, val);
+		*val = vt_read_cr4 ();
 		break;
 	default:
 		panic ("Fatal error: unknown control register.");
@@ -346,6 +346,9 @@ pe_change (bool pe)
 
 	/* enable emulation */
 	pe_change_enable_sw (pe);
+
+	current->u.vt.exint_re_pending = false;
+	current->u.vt.exint_update = true;
 }
 
 void
@@ -372,7 +375,7 @@ vt_write_control_reg (enum control_reg reg, ulong val)
 		current->u.vt.vr.cr2 = val;
 		break;
 	case CONTROL_REG_CR3:
-		current->u.vt.vr.cr3 = val;
+		vt_write_cr3 (val);
 		vt_paging_updatecr3 ();
 		vt_paging_flush_guest_tlb ();
 		break;
@@ -780,7 +783,7 @@ vt_reset (void)
 	asm_vmwrite (VMCS_CR0_READ_SHADOW, CR0_ET_BIT);
 	asm_vmwrite (VMCS_GUEST_CR0, vt_paging_apply_fixed_cr0 (CR0_ET_BIT));
 	current->u.vt.vr.cr2 = 0;
-	current->u.vt.vr.cr3 = 0;
+	vt_write_cr3 (0);
 	asm_vmwrite (VMCS_CR4_READ_SHADOW, 0);
 	asm_vmwrite (VMCS_GUEST_CR4, vt_paging_apply_fixed_cr4 (0));
 	vt_write_msr (MSR_IA32_EFER, 0);
@@ -846,6 +849,8 @@ vt_reset (void)
 	current->u.vt.realmode.tr_base = 0;
 	current->u.vt.realmode.idtr.base = 0;
 	current->u.vt.realmode.idtr.limit = 0xFFFF;
+	current->u.vt.exint_re_pending = false;
+	current->u.vt.exint_update = true;
 	vt_msr_update_lma ();
 	vt_paging_updatecr3 ();
 	vt_paging_flush_guest_tlb ();

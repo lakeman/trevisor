@@ -72,5 +72,5 @@ int newprocess (char *name);
 int msgsendbuf (int desc, int data, struct msgbuf *buf, int bufcnt);
 int msgunregister (int desc);
 void exitprocess (int retval);
-int restrict (int stacksize, int maxstacksize);
+int setlimit (int stacksize, int maxstacksize);
 unsigned long int getdbreg (int reg);

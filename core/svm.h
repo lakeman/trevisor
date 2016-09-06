@@ -52,13 +52,14 @@ struct svm {
 	struct svm_vmrun_regs vr;
 	struct svm_vmcb_info vi;
 	struct svm_intr_data intr;
-	struct svm_io io;
-	struct svm_msr msr;
+	struct svm_io *io;
+	struct svm_msrbmp *msrbmp;
 	struct svm_np *np;
-	bool lme, lma;
+	bool lme, lma, svme;
 	struct vmcb *saved_vmcb;
 	u64 *cr0, *cr3, *cr4;
 	u64 gcr0, gcr3, gcr4;
+	u64 vm_cr, hsave_pa;
 };
 
 struct svm_pcpu_data {
@@ -67,6 +68,8 @@ struct svm_pcpu_data {
 	struct vmcb *vmcbhost;
 	u64 vmcbhost_phys;
 	bool flush_by_asid;
+	bool nrip_save;
+	u32 nasid;
 };
 
 void vmctl_svm_init (void);

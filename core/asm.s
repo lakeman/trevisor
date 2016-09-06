@@ -56,6 +56,7 @@ asm_vmlaunch_regs_32:
 	push	%edi
 	mov	20(%esp),%edi	# arg1
 	push	%edi
+	sub	$4,%esp
 	mov	$VMCS_HOST_RSP,%eax
 	mov	%esp,%edx
 	vmwrite	%edx,%eax
@@ -74,11 +75,13 @@ asm_vmlaunch_regs_32:
 	vmlaunch
 	xor	%eax,%eax
 	dec	%eax
+	add	$4,%esp
 	pop	%edi
 	jmp	2f
 	.align	16
 1:
-	xchg	(%esp),%edi
+	mov	%edi,(%esp)
+	mov	4(%esp),%edi
 	mov	%eax,4*RAX(%edi)
 	mov	%ecx,4*RCX(%edi)
 	mov	%edx,4*RDX(%edi)
@@ -86,6 +89,7 @@ asm_vmlaunch_regs_32:
 	mov	%ebp,4*RBP(%edi)
 	mov	%esi,4*RSI(%edi)
 	popl	4*RDI(%edi)
+	add	$4,%esp
 	mov	%cr2,%eax
 	mov	%eax,4*CR2(%edi)
 	xor	%eax,%eax
@@ -104,6 +108,7 @@ asm_vmresume_regs_32:
 	push	%edi
 	mov	20(%esp),%edi	# arg1
 	push	%edi
+	sub	$4,%esp
 	mov	$VMCS_HOST_RSP,%eax
 	mov	%esp,%edx
 	vmwrite	%edx,%eax
@@ -122,11 +127,13 @@ asm_vmresume_regs_32:
 	vmresume
 	xor	%eax,%eax
 	dec	%eax
+	add	$4,%esp
 	pop	%edi
 	jmp	2f
 	.align	16
 1:
-	xchg	(%esp),%edi
+	mov	%edi,(%esp)
+	mov	4(%esp),%edi
 	mov	%eax,4*RAX(%edi)
 	mov	%ecx,4*RCX(%edi)
 	mov	%edx,4*RDX(%edi)
@@ -134,6 +141,7 @@ asm_vmresume_regs_32:
 	mov	%ebp,4*RBP(%edi)
 	mov	%esi,4*RSI(%edi)
 	popl	4*RDI(%edi)
+	add	$4,%esp
 	mov	%cr2,%eax
 	mov	%eax,4*CR2(%edi)
 	xor	%eax,%eax
@@ -160,8 +168,52 @@ asm_vmrun_regs_32:
 	mov	4*RSI(%eax),%esi
 	mov	4*RDI(%eax),%edi
 	mov	24(%esp),%eax	# arg2
+	clgi
 	vmload
 	vmrun
+	vmsave
+	mov	20(%esp),%eax	# arg1
+	mov	%ecx,4*RCX(%eax)
+	mov	%edx,4*RDX(%eax)
+	mov	%ebx,4*RBX(%eax)
+	mov	%ebp,4*RBP(%eax)
+	mov	%esi,4*RSI(%eax)
+	mov	%edi,4*RDI(%eax)
+	mov	28(%esp),%eax	# arg3
+	vmload
+	stgi
+	pop	%edi
+	pop	%esi
+	pop	%ebx
+	pop	%ebp
+	ret
+	.globl	asm_vmrun_regs_nested_32
+	.align	16
+asm_vmrun_regs_nested_32:
+	push	%ebp
+	push	%ebx
+	push	%esi
+	push	%edi
+	mov	28(%esp),%eax	# arg3
+	vmsave
+	mov	20(%esp),%eax	# arg1
+	mov	4*RCX(%eax),%ecx
+	mov	4*RDX(%eax),%edx
+	mov	4*RBX(%eax),%ebx
+	mov	4*RBP(%eax),%ebp
+	mov	4*RSI(%eax),%esi
+	mov	4*RDI(%eax),%edi
+	mov	24(%esp),%eax	# arg2
+	clgi
+	vmload
+	mov	32(%esp),%eax	# arg4
+	testl	$-1,36(%esp)	# arg5
+	je	1f
+	sti
+1:
+	vmrun
+	cli
+	mov	24(%esp),%eax	# arg2
 	vmsave
 	mov	20(%esp),%eax	# arg1
 	mov	%ecx,4*RCX(%eax)
@@ -189,6 +241,7 @@ asm_vmlaunch_regs_64:
 	push	%r14
 	push	%r15
 	push	%rdi		# arg1
+	sub	$8,%rsp
 	mov	$VMCS_HOST_RSP,%rax
 	mov	%rsp,%rdx
 	vmwrite	%rdx,%rax
@@ -215,11 +268,13 @@ asm_vmlaunch_regs_64:
 	vmlaunch
 	xor	%rax,%rax
 	dec	%rax
+	add	$8,%rsp
 	pop	%rdi
 	jmp	2f
 	.align	16
 1:
-	xchg	(%rsp),%rdi
+	mov	%rdi,(%rsp)
+	mov	8(%rsp),%rdi
 	mov	%rax,8*RAX(%rdi)
 	mov	%rcx,8*RCX(%rdi)
 	mov	%rdx,8*RDX(%rdi)
@@ -227,6 +282,7 @@ asm_vmlaunch_regs_64:
 	mov	%rbp,8*RBP(%rdi)
 	mov	%rsi,8*RSI(%rdi)
 	popq	8*RDI(%rdi)
+	add	$8,%rsp
 	mov	%cr2,%rax
 	mov	%rax,8*CR2(%rdi)
 	mov	%r8,8*R8(%rdi)
@@ -256,6 +312,7 @@ asm_vmresume_regs_64:
 	push	%r14
 	push	%r15
 	push	%rdi		# arg1
+	sub	$8,%rsp
 	mov	$VMCS_HOST_RSP,%rax
 	mov	%rsp,%rdx
 	vmwrite	%rdx,%rax
@@ -282,11 +339,13 @@ asm_vmresume_regs_64:
 	vmresume
 	xor	%rax,%rax
 	dec	%rax
+	add	$8,%rsp
 	pop	%rdi
 	jmp	2f
 	.align	16
 1:
-	xchg	(%rsp),%rdi
+	mov	%rdi,(%rsp)
+	mov	8(%rsp),%rdi
 	mov	%rax,8*RAX(%rdi)
 	mov	%rcx,8*RCX(%rdi)
 	mov	%rdx,8*RDX(%rdi)
@@ -294,6 +353,7 @@ asm_vmresume_regs_64:
 	mov	%rbp,8*RBP(%rdi)
 	mov	%rsi,8*RSI(%rdi)
 	popq	8*RDI(%rdi)
+	add	$8,%rsp
 	mov	%cr2,%rax
 	mov	%rax,8*CR2(%rdi)
 	mov	%r8,8*R8(%rdi)
@@ -342,8 +402,77 @@ asm_vmrun_regs_64:
 	mov	8*RBP(%rdi),%rbp
 	mov	8*RSI(%rdi),%rsi
 	mov	8*RDI(%rdi),%rdi
+	clgi
 	vmload
 	vmrun
+	vmsave
+	pop	%rax		# arg1
+	mov	%rcx,8*RCX(%rax)
+	mov	%rdx,8*RDX(%rax)
+	mov	%rbx,8*RBX(%rax)
+	mov	%rbp,8*RBP(%rax)
+	mov	%rsi,8*RSI(%rax)
+	mov	%rdi,8*RDI(%rax)
+	mov	%r8,8*R8(%rax)
+	mov	%r9,8*R9(%rax)
+	mov	%r10,8*R10(%rax)
+	mov	%r11,8*R11(%rax)
+	mov	%r12,8*R12(%rax)
+	mov	%r13,8*R13(%rax)
+	mov	%r14,8*R14(%rax)
+	mov	%r15,8*R15(%rax)
+	pop	%rax		# arg3
+	vmload
+	stgi
+	pop	%r15
+	pop	%r14
+	pop	%r13
+	pop	%r12
+	pop	%rbx
+	pop	%rbp
+	ret
+	.globl	asm_vmrun_regs_nested_64
+	.align	16
+asm_vmrun_regs_nested_64:
+	push	%rbp
+	push	%rbx
+	push	%r12
+	push	%r13
+	push	%r14
+	push	%r15
+	mov	%rdx,%rax	# arg3
+	push	%rdx		# arg3
+	vmsave
+	push	%rdi		# arg1
+	push	%rsi		# arg2
+	push	%rcx		# arg4
+	push	%r8		# arg5
+	mov	%rsi,%rax	# arg2
+	mov	8*R8(%rdi),%r8
+	mov	8*R9(%rdi),%r9
+	mov	8*R10(%rdi),%r10
+	mov	8*R11(%rdi),%r11
+	mov	8*R12(%rdi),%r12
+	mov	8*R13(%rdi),%r13
+	mov	8*R14(%rdi),%r14
+	mov	8*R15(%rdi),%r15
+	mov	8*RCX(%rdi),%rcx
+	mov	8*RDX(%rdi),%rdx
+	mov	8*RBX(%rdi),%rbx
+	mov	8*RBP(%rdi),%rbp
+	mov	8*RSI(%rdi),%rsi
+	mov	8*RDI(%rdi),%rdi
+	clgi
+	vmload
+	pop	%rax		# arg5
+	test	%rax,%rax
+	je	1f
+	sti
+1:
+	pop	%rax		# arg4
+	vmrun
+	cli
+	pop	%rax		# arg2
 	vmsave
 	pop	%rax		# arg1
 	mov	%rcx,8*RCX(%rax)

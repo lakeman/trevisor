@@ -113,6 +113,9 @@ msr_pass_write_msr (u32 msrindex, u64 msrdata)
 		}
 		localapic_change_base_msr (msrdata);
 		goto pass;
+	case MSR_IA32_X2APIC_ICR:
+		localapic_x2apic_icr (msrdata);
+		goto pass;
 	default:
 	pass:
 		m.msrindex = msrindex;
@@ -130,11 +133,38 @@ msr_pass_write_msr (u32 msrindex, u64 msrdata)
 	return false;
 }
 
+void
+msr_pass_hook_x2apic_icr (int hook)
+{
+	if (hook)
+		current->vmctl.msrpass (MSR_IA32_X2APIC_ICR, true, false);
+	else
+		current->vmctl.msrpass (MSR_IA32_X2APIC_ICR, true, true);
+}
+
 static void
 msr_pass_init (void)
 {
+	u32 i;
+
 	current->msr.read_msr = msr_pass_read_msr;
 	current->msr.write_msr = msr_pass_write_msr;
+	if (current->vcpu0 == current) {
+		for (i = 0x0; i <= 0x1FFF; i++) {
+			current->vmctl.msrpass (i, false, true);
+			current->vmctl.msrpass (i, true, true);
+			current->vmctl.msrpass (i + 0xC0000000, false, true);
+			current->vmctl.msrpass (i + 0xC0000000, true, true);
+			current->vmctl.msrpass (i + 0xC0010000, false, true);
+			current->vmctl.msrpass (i + 0xC0010000, true, true);
+		}
+		current->vmctl.msrpass (MSR_IA32_BIOS_UPDT_TRIG, true, false);
+		current->vmctl.msrpass (MSR_IA32_TIME_STAMP_COUNTER, false,
+					false);
+		current->vmctl.msrpass (MSR_IA32_TIME_STAMP_COUNTER, true,
+					false);
+		current->vmctl.msrpass (MSR_IA32_APIC_BASE_MSR, true, false);
+	}
 }
 
 INITFUNC ("pass0", msr_pass_init);

@@ -94,6 +94,16 @@ asmlinkage void asm_vmrun_regs_32 (struct svm_vmrun_regs *p, ulong vmcb_phys,
 				   ulong vmcbhost_phys);
 asmlinkage void asm_vmrun_regs_64 (struct svm_vmrun_regs *p, ulong vmcb_phys,
 				   ulong vmcbhost_phys);
+asmlinkage void asm_vmrun_regs_nested_32 (struct svm_vmrun_regs *p,
+					  ulong vmcb_phys,
+					  ulong vmcbhost_phys,
+					  ulong vmcbnested,
+					  ulong rflags_if_bit);
+asmlinkage void asm_vmrun_regs_nested_64 (struct svm_vmrun_regs *p,
+					  ulong vmcb_phys,
+					  ulong vmcbhost_phys,
+					  ulong vmcbnested,
+					  ulong rflags_if_bit);
 
 static inline void
 asm_cpuid (u32 num, u32 numc, u32 *a, u32 *b, u32 *c, u32 *d)
@@ -339,6 +349,19 @@ asm_vmwrite (ulong index, ulong val)
 #endif
 }
 
+static inline void
+asm_vmwrite64 (ulong index, u64 val)
+{
+	ulong tmp, tmp_high;
+
+	tmp = val;
+	asm_vmwrite (index, tmp);
+	if (sizeof val != sizeof (ulong)) {
+		tmp_high = val >> 32;
+		asm_vmwrite (index + 1, tmp_high);
+	}
+}
+
 /* 0f 01 c2                vmlaunch  */
 static inline void
 asm_vmlaunch (void)
@@ -410,6 +433,20 @@ asm_vmread (ulong index, ulong *val)
 		      : "r" (index)
 		      : "cc");
 #endif
+}
+
+static inline void
+asm_vmread64 (ulong index, u64 *val)
+{
+	ulong tmp, tmp_high;
+
+	asm_vmread (index, &tmp);
+	if (sizeof *val != sizeof (ulong)) {
+		asm_vmread (index + 1, &tmp_high);
+		*val = tmp | (u64)tmp_high << 32;
+	} else {
+		*val = tmp;
+	}
 }
 
 static inline void
@@ -726,6 +763,12 @@ asm_invlpg (void *p)
 }
 
 static inline void
+asm_invlpga (ulong addr, u32 asid)
+{
+	asm volatile ("invlpga" : : "a" (addr), "c" (asid));
+}
+
+static inline void
 asm_cli_and_hlt (void)
 {
 	asm volatile ("cli; hlt");
@@ -740,7 +783,11 @@ asm_sti_and_nop_and_cli (void)
 static inline void
 asm_pause (void)
 {
-	asm volatile ("pause");
+	/* This function is used by in loops of spinlock-like
+	 * functions.  So memory may be modified by other CPUs during
+	 * this function.  "memory" avoids some optimization for
+	 * convenient. */
+	asm volatile ("pause" : : : "memory");
 }
 
 static inline void
@@ -775,7 +822,7 @@ asm_mul_and_div (u32 mul1, u32 mul2, u32 div1, u32 *quotient, u32 *remainder)
 static inline void
 asm_lock_incl (u32 *d)
 {
-	asm volatile ("lock incl %0" : "=m" (*d));
+	asm volatile ("lock incl %0" : "+m" (*d));
 }
 
 /*
@@ -790,15 +837,18 @@ asm_lock_incl (u32 *d)
 static inline bool
 asm_lock_cmpxchgl (u32 *dest, u32 *cmp, u32 eq)
 {
-	int tmp;
+	u8 tmp;
 
-	asm volatile ("lock cmpxchgl %4,%1 ; je 1f ; inc %2 ; 1:"
+	asm volatile ("lock cmpxchgl %4,%1 ; setne %2"
 		      : "=&a" (*cmp)
-		      , "=m" (*dest)
-		      , "=&r" (tmp)
+		      , "+m" (*dest)
+#ifdef __x86_64__
+		      , "=r" (tmp)
+#else
+		      , "=dcb" (tmp)
+#endif
 		      : "0" (*cmp)
 		      , "r" (eq)
-		      , "2" (0)
 		      : "memory", "cc");
 	return (bool)tmp;
 }
@@ -806,29 +856,40 @@ asm_lock_cmpxchgl (u32 *dest, u32 *cmp, u32 eq)
 static inline bool
 asm_lock_cmpxchgq (u64 *dest, u64 *cmp, u64 eq)
 {
-	int tmp;
+	u8 tmp;
 
 #ifdef __x86_64__
-	asm volatile ("lock cmpxchgq %4,%1 ; je 1f ; inc %2 ; 1:"
+	asm volatile ("lock cmpxchgq %4,%1 ; setne %2"
 		      : "=&a" (*cmp)
-		      , "=m" (*dest)
-		      , "=&r" (tmp)
+		      , "+m" (*dest)
+		      , "=r" (tmp)
 		      : "0" (*cmp)
 		      , "r" (eq)
-		      , "2" (0)
 		      : "memory", "cc");
 #else
-	asm volatile ("lock cmpxchg8b %1 ; je 1f ; inc %2 ; 1:"
+	asm volatile ("lock cmpxchg8b %1 ; setne %2"
 		      : "=&A" (*cmp)
-		      , "=m" (*dest)
-		      , "=&r" (tmp)
+		      , "+m" (*dest)
+		      , "=bc" (tmp)
 		      : "0" (*cmp)
 		      , "b" ((u32)eq)
 		      , "c" ((u32)(eq >> 32))
-		      , "2" (0)
 		      : "memory", "cc");
 #endif
 	return (bool)tmp;
+}
+
+/* old = *mem; *mem = newval; return old; */
+static inline u32
+asm_lock_xchgl (u32 *mem, u32 newval)
+{
+	u32 oldval;
+
+	asm volatile ("xchg %0,%1"
+		      : "=r" (oldval)
+		      , "+m" (*mem)
+		      : "0" (newval));
+	return oldval;
 }
 
 /* old = *mem; *mem = newval; return old; */
@@ -839,7 +900,7 @@ asm_lock_ulong_swap (ulong *mem, ulong newval)
 
 	asm volatile ("xchg %0,%1"
 		      : "=r" (oldval)
-		      , "=m" (*mem)
+		      , "+m" (*mem)
 		      : "0" (newval));
 	return oldval;
 }
@@ -852,6 +913,20 @@ asm_vmrun_regs (struct svm_vmrun_regs *p, ulong vmcb_phys, ulong vmcbhost_phys)
 	asm_vmrun_regs_64 (p, vmcb_phys, vmcbhost_phys);
 #else
 	asm_vmrun_regs_32 (p, vmcb_phys, vmcbhost_phys);
+#endif
+}
+
+static inline void
+asm_vmrun_regs_nested (struct svm_vmrun_regs *p, ulong vmcb_phys,
+		       ulong vmcbhost_phys, ulong vmcbnested,
+		       ulong rflags_if_bit)
+{
+#ifdef __x86_64__
+	asm_vmrun_regs_nested_64 (p, vmcb_phys, vmcbhost_phys, vmcbnested,
+				  rflags_if_bit);
+#else
+	asm_vmrun_regs_nested_32 (p, vmcb_phys, vmcbhost_phys, vmcbnested,
+				  rflags_if_bit);
 #endif
 }
 

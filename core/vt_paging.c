@@ -35,6 +35,7 @@
 #include "vt_ept.h"
 #include "vt_main.h"
 #include "vt_paging.h"
+#include "vt_regs.h"
 
 bool
 vt_paging_extern_flush_tlb_entry (struct vcpu *p, phys_t s, phys_t e)
@@ -58,10 +59,6 @@ ept_enabled (void)
 void
 vt_paging_map_1mb (void)
 {
-#ifdef CPU_MMU_SPT_DISABLE
-	if (current->u.vt.vr.pg)
-		return;
-#endif
 	if (ept_enabled ())
 		vt_ept_map_1mb ();
 	else
@@ -89,24 +86,11 @@ vt_paging_flush_guest_tlb (void)
 void
 vt_paging_init (void)
 {
-	ulong tmp;
-
-#ifdef CPU_MMU_SPT_DISABLE
-	cpu_mmu_spt_init ();
-	current->u.vt.handle_pagefault = true;
-	return;
-#endif
 	if (current->u.vt.ept_available &&
-	    current->u.vt.unrestricted_guest_available) {
-		current->u.vt.handle_pagefault = false;
+	    current->u.vt.unrestricted_guest_available)
 		current->u.vt.unrestricted_guest = true;
-		asm_vmread (VMCS_PROC_BASED_VMEXEC_CTL2, &tmp);
-		tmp |= VMCS_PROC_BASED_VMEXEC_CTL2_UNRESTRICTED_GUEST_BIT;
-		asm_vmwrite (VMCS_PROC_BASED_VMEXEC_CTL2, tmp);
-	} else {
+	else
 		cpu_mmu_spt_init ();
-		current->u.vt.handle_pagefault = true;
-	}
 	if (current->u.vt.ept_available)
 		vt_ept_init ();
 	vt_paging_pg_change ();
@@ -156,10 +140,23 @@ vt_paging_invalidate (ulong addr)
 void
 vt_paging_npf (bool write, u64 gphys)
 {
+#ifdef CPU_MMU_SPT_DISABLE
+	if (current->u.vt.vr.pg)
+		panic ("EPT violation while spt disabled");
+#endif
 	if (ept_enabled ())
 		vt_ept_violation (write, gphys);
 	else
 		panic ("EPT violation while ept disabled");
+}
+
+static void
+vt_update_vmcs_guest_cr3 (void)
+{
+	struct vt *p = &current->u.vt;
+
+	if (!p->cr3exit_off)
+		asm_vmwrite (VMCS_GUEST_CR3, p->vr.cr3);
 }
 
 void
@@ -167,12 +164,13 @@ vt_paging_updatecr3 (void)
 {
 #ifdef CPU_MMU_SPT_DISABLE
 	if (current->u.vt.vr.pg) {
-		asm_vmwrite (VMCS_GUEST_CR3, current->u.vt.vr.cr3);
+		vt_update_vmcs_guest_cr3 ();
+		vt_paging_flush_guest_tlb ();
 		return;
 	}
 #endif
 	if (ept_enabled ()) {
-		asm_vmwrite (VMCS_GUEST_CR3, current->u.vt.vr.cr3);
+		vt_update_vmcs_guest_cr3 ();
 		vt_ept_updatecr3 ();
 	} else {
 		cpu_mmu_spt_updatecr3 ();
@@ -213,16 +211,12 @@ bool
 vt_paging_set_gpat (u64 pat)
 {
 	bool r;
-	u32 tmpl, tmph;
 
 	r = cache_set_gpat (pat);
 	if (!current->u.vt.unrestricted_guest)
 		cpu_mmu_spt_clear_all ();
-	if (!r && ept_enabled ()) {
-		conv64to32 (pat, &tmpl, &tmph);
-		asm_vmwrite (VMCS_GUEST_IA32_PAT, tmpl);
-		asm_vmwrite (VMCS_GUEST_IA32_PAT_HIGH, tmph);
-	}
+	if (!r && ept_enabled ())
+		asm_vmwrite64 (VMCS_GUEST_IA32_PAT, pat);
 	return r;
 }
 
@@ -273,21 +267,47 @@ vt_paging_pg_change (void)
 {
 	ulong tmp;
 	u64 tmp64;
-	u32 tmpl, tmph;
 	bool ept_enable, use_spt;
+	ulong cr3;
 
 	ept_enable = ept_enabled ();
 	use_spt = !ept_enable;
 #ifdef CPU_MMU_SPT_DISABLE
-	ept_enable = false;
-	use_spt = !current->u.vt.vr.pg;
+	if (current->u.vt.vr.pg) {
+		ulong rflags;
+		ulong acr;
+
+		/* If both EPT and "unrestricted guest" were enabled,
+		 * the CS could be a data segment.  But
+		 * CPU_MMU_SPT_DISABLE disables EPT while the guest
+		 * enables paging.  So if the CS is a data segment
+		 * here, make it a code segment. */
+		if (!ept_enable || !current->u.vt.unrestricted_guest)
+			goto cs_is_ok;
+		asm_vmread (VMCS_GUEST_CS_ACCESS_RIGHTS, &acr);
+		if ((acr & 0xF) != SEGDESC_TYPE_RDWR_DATA_A)
+			goto cs_is_ok;
+		/* The CS can be a data segment in virtual 8086
+		 * mode. */
+		asm_vmread (VMCS_GUEST_RFLAGS, &rflags);
+		if (rflags & RFLAGS_VM_BIT)
+			goto cs_is_ok;
+		asm_vmwrite (VMCS_GUEST_CS_ACCESS_RIGHTS,
+			     (acr & ~0xF) | SEGDESC_TYPE_EXECREAD_CODE_A);
+	cs_is_ok:
+		ept_enable = false;
+		use_spt = false;
+	}
 #endif
 	if (current->u.vt.ept) {
 		asm_vmread (VMCS_PROC_BASED_VMEXEC_CTL2, &tmp);
-		if (ept_enable)
-			tmp |= VMCS_PROC_BASED_VMEXEC_CTL2_ENABLE_EPT_BIT;
-		else
-			tmp &= ~VMCS_PROC_BASED_VMEXEC_CTL2_ENABLE_EPT_BIT;
+		tmp &= ~(VMCS_PROC_BASED_VMEXEC_CTL2_ENABLE_EPT_BIT |
+			 VMCS_PROC_BASED_VMEXEC_CTL2_UNRESTRICTED_GUEST_BIT);
+		tmp |= ept_enable ?
+			VMCS_PROC_BASED_VMEXEC_CTL2_ENABLE_EPT_BIT |
+			(current->u.vt.unrestricted_guest ?
+			 VMCS_PROC_BASED_VMEXEC_CTL2_UNRESTRICTED_GUEST_BIT :
+			 0) : 0;
 		asm_vmwrite (VMCS_PROC_BASED_VMEXEC_CTL2, tmp);
 		asm_vmread (VMCS_VMEXIT_CTL, &tmp);
 		if (ept_enable)
@@ -305,13 +325,9 @@ vt_paging_pg_change (void)
 		asm_vmwrite (VMCS_VMENTRY_CTL, tmp);
 		if (ept_enable) {
 			asm_rdmsr64 (MSR_IA32_PAT, &tmp64);
-			conv64to32 (tmp64, &tmpl, &tmph);
-			asm_vmwrite (VMCS_HOST_IA32_PAT, tmpl);
-			asm_vmwrite (VMCS_HOST_IA32_PAT_HIGH, tmph);
+			asm_vmwrite64 (VMCS_HOST_IA32_PAT, tmp64);
 			cache_get_gpat (&tmp64);
-			conv64to32 (tmp64, &tmpl, &tmph);
-			asm_vmwrite (VMCS_GUEST_IA32_PAT, tmpl);
-			asm_vmwrite (VMCS_GUEST_IA32_PAT_HIGH, tmph);
+			asm_vmwrite64 (VMCS_GUEST_IA32_PAT, tmp64);
 		}
 	}
 	asm_vmread (VMCS_PROC_BASED_VMEXEC_CTL, &tmp);
@@ -319,12 +335,29 @@ vt_paging_pg_change (void)
 		tmp |= VMCS_PROC_BASED_VMEXEC_CTL_INVLPGEXIT_BIT;
 	else
 		tmp &= ~VMCS_PROC_BASED_VMEXEC_CTL_INVLPGEXIT_BIT;
+	if (current->u.vt.cr3exit_controllable) {
+		if (use_spt && current->u.vt.cr3exit_off) {
+			cr3 = vt_read_cr3 ();
+			tmp |= VMCS_PROC_BASED_VMEXEC_CTL_CR3LOADEXIT_BIT;
+			tmp |= VMCS_PROC_BASED_VMEXEC_CTL_CR3STOREEXIT_BIT;
+			current->u.vt.cr3exit_off = false;
+			vt_write_cr3 (cr3);
+		} else if (!use_spt && !current->u.vt.cr3exit_off) {
+			cr3 = vt_read_cr3 ();
+			tmp &= ~VMCS_PROC_BASED_VMEXEC_CTL_CR3LOADEXIT_BIT;
+			tmp &= ~VMCS_PROC_BASED_VMEXEC_CTL_CR3STOREEXIT_BIT;
+			current->u.vt.cr3exit_off = true;
+			vt_write_cr3 (cr3);
+		}
+	}
 	asm_vmwrite (VMCS_PROC_BASED_VMEXEC_CTL, tmp);
-	asm_vmread (VMCS_CR0_READ_SHADOW, &tmp);
+	tmp = vt_read_cr0 ();
 	asm_vmwrite (VMCS_GUEST_CR0, vt_paging_apply_fixed_cr0 (tmp));
-	tmp = use_spt ? current->u.vt.spt_cr3 : current->u.vt.vr.cr3;
-	asm_vmwrite (VMCS_GUEST_CR3, tmp);
-	asm_vmread (VMCS_CR4_READ_SHADOW, &tmp);
+	if (use_spt)
+		asm_vmwrite (VMCS_GUEST_CR3, current->u.vt.spt_cr3);
+	else
+		vt_update_vmcs_guest_cr3 ();
+	tmp = vt_read_cr4 ();
 	asm_vmwrite (VMCS_GUEST_CR4, vt_paging_apply_fixed_cr4 (tmp));
 	current->u.vt.handle_pagefault = use_spt;
 	vt_update_exception_bmp ();

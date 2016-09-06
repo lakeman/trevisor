@@ -30,6 +30,7 @@
 #include "ap.h"
 #include "assert.h"
 #include "callrealmode.h"
+#include "calluefi.h"
 #include "config.h"
 #include "convert.h"
 #include "current.h"
@@ -55,6 +56,7 @@
 #include "tresor.h"
 #include "tresor_asm.h"
 #include "types.h"
+#include "uefi.h"
 #include "vcpu.h"
 #include "vmmcall.h"
 #include "vmmcall_boot.h"
@@ -298,10 +300,11 @@ static void
 bsp_init_thread (void *args)
 {
 	u32 tmpbufaddr, tmpbufsize;
-	u8 bios_boot_drive;
+	u8 bios_boot_drive = 0;
 	void *p;
 
-	bios_boot_drive = detect_bios_boot_device (&mi);
+	if (!uefi_booted)
+		bios_boot_drive = detect_bios_boot_device (&mi);
 	save_bios_data_area ();
 	callrealmode_usevcpu (current);
 	if (minios_startaddr) {
@@ -327,11 +330,16 @@ bsp_init_thread (void *args)
 	} else {
 		load_drivers ();
 	}
-	get_tmpbuf (&tmpbufaddr, &tmpbufsize);
-	load_bootsector (bios_boot_drive, tmpbufaddr, tmpbufsize);
-	sync_cursor_pos ();
+	if (!uefi_booted) {
+		get_tmpbuf (&tmpbufaddr, &tmpbufsize);
+		load_bootsector (bios_boot_drive, tmpbufaddr, tmpbufsize);
+		sync_cursor_pos ();
+	}
 	initregs ();
-	copy_bootsector ();
+	if (uefi_booted)
+		copy_uefi_bootcode ();
+	else
+		copy_bootsector ();
 }
 
 static void
@@ -366,6 +374,7 @@ create_pass_vm (void)
 	sync_all_processors ();
 	if (bsp)
 		print_startvm_msg ();
+	currentcpu->pass_vm_created = true;
 #ifdef DEBUG_GDB
 	if (!bsp)
 		for (;;)
@@ -373,6 +382,16 @@ create_pass_vm (void)
 #endif
 	current->vmctl.start_vm ();
 	panic ("VM stopped.");
+}
+
+static void
+wait_for_create_pass_vm (void)
+{
+	sync_all_processors ();
+	sync_all_processors ();
+	sync_all_processors ();
+	sync_all_processors ();
+	sync_all_processors ();
 }
 
 void
@@ -399,7 +418,14 @@ resume_vm (u32 wake_addr)
 static void
 get_shiftflags (void)
 {
-	shiftkey = callrealmode_getshiftflags ();
+#ifdef SHIFT_KEY_DEBUG
+	if (uefi_booted)
+		shiftkey = 0;
+	else
+		shiftkey = callrealmode_getshiftflags ();
+#else
+	shiftkey = 0;
+#endif
 }
 
 static void
@@ -456,7 +482,9 @@ bsp_proc (void)
 asmlinkage void
 vmm_main (struct multiboot_info *mi_arg)
 {
-	memcpy (&mi, mi_arg, sizeof (struct multiboot_info));
+	uefi_booted = !mi_arg;
+	if (!uefi_booted)
+		memcpy (&mi, mi_arg, sizeof (struct multiboot_info));
 	initfunc_init ();
 	call_initfunc ("global");
 #ifdef TRESOR
@@ -470,6 +498,7 @@ vmm_main (struct multiboot_info *mi_arg)
 
 INITFUNC ("pcpu2", virtualization_init_pcpu);
 INITFUNC ("pcpu5", create_pass_vm);
+INITFUNC ("dbsp5", wait_for_create_pass_vm);
 INITFUNC ("bsp0", debug_on_shift_key);
 INITFUNC ("global1", print_boot_msg);
 INITFUNC ("global3", copy_minios);
