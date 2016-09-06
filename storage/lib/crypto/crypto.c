@@ -63,12 +63,15 @@ crypto_init (void)
 {
 	void aes_xts_init (void);
 	void crypto_none_init (void);
+#ifdef TRESOR
+	void tresor_xts_init (void);
+#endif
 
 	crypto_list = NULL;
 	aes_xts_init ();
 	crypto_none_init ();
 #ifdef TRESOR
-    crypto_tresor_init();
+	tresor_xts_init ();
 #endif
 
 }

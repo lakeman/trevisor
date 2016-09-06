@@ -30,4 +30,4 @@ enableSSE:
 /*      set ts bit to 0 */ 
     and $0xf7, %al
     mov %rax, %cr0
-
+    retq

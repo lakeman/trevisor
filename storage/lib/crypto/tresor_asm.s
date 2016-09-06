@@ -4,6 +4,7 @@
  * (currently all Core-i5/7 processors and some Core-i3)
  * 
  * Copyright (C) 2010  Tilo Mueller <tilo.mueller@informatik.uni-erlangen.de>
+ * Copyright (C) 2013  Johannes Goetzfried <johannes@jgoetzfried.de>
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -79,7 +80,7 @@
    pxor    %xmm15,%xmm15
 
    /* return true */
-   movl    $0,%eax
+   xorq    %rax,%rax
    retq
 .endm
 
@@ -200,8 +201,8 @@
 .endm
 
 
-/* copy secret key from dbg regs into xmm regs */
-.macro read_key r0 r1 rounds
+/* copy secret key from dbg regs into xmm regs (lower part of key) */
+.macro read_key_0 r0 r1 rounds
    movq    db0,%rax
    movq    %rax,\r0
    movq    db1,%rax
@@ -218,61 +219,72 @@
    .endif
 .endm
 
+/* copy secret key from dbg regs into xmm regs (upper part of key)
+ * only valid for AES-128
+ */
+.macro read_key_1 r0 r1 rounds
+   movq    db2,%rax
+   movq    %rax,\r0
+   movq    db3,%rax
+   movq    %rax,rhelp
+   shufps  $0x44,rhelp,\r0
+.endm
+
 
 /* Encrypt */
-.macro encrypt_block rounds 
+.macro encrypt_block rounds up
    movdqu  0(%rsi),rstate
-   read_key    rk0 rk1 \rounds
-   pxor        rk0,rstate
+   read_key_\up  rk0 rk1 \rounds
+   pxor          rk0,rstate
    generate_rks_\rounds
-   aesenc      rk1,rstate
-   aesenc      rk2,rstate
-   aesenc      rk3,rstate
-   aesenc      rk4,rstate
-   aesenc      rk5,rstate
-   aesenc      rk6,rstate
-   aesenc      rk7,rstate
-   aesenc      rk8,rstate
-   aesenc      rk9,rstate
+   aesenc        rk1,rstate
+   aesenc        rk2,rstate
+   aesenc        rk3,rstate
+   aesenc        rk4,rstate
+   aesenc        rk5,rstate
+   aesenc        rk6,rstate
+   aesenc        rk7,rstate
+   aesenc        rk8,rstate
+   aesenc        rk9,rstate
    .if (\rounds > 10)
-   aesenc      rk10,rstate
-   aesenc      rk11,rstate
-   .endif 
-   .if (\rounds > 12)
-   aesenc      rk12,rstate
-   aesenc      rk13,rstate
+   aesenc        rk10,rstate
+   aesenc        rk11,rstate
    .endif
-   aesenclast  rk\rounds,rstate 
-   epilog 
+   .if (\rounds > 12)
+   aesenc        rk12,rstate
+   aesenc        rk13,rstate
+   .endif
+   aesenclast    rk\rounds,rstate
+   epilog
 .endm
 
 
 /* Decrypt */
-.macro decrypt_block rounds 
+.macro decrypt_block rounds up
    movdqu  0(%rsi),rstate
-   read_key    rk0 rk1 \rounds
+   read_key_\up  rk0 rk1 \rounds
    generate_rks_\rounds
-   pxor        rk\rounds,rstate
+   pxor          rk\rounds,rstate
    .if (\rounds > 12)
-   read_key    rk0,rk1,10
-   aesdec_     rk13,rstate
-   aesdec_     rk12,rstate
+   read_key_\up  rk0,rk1,10
+   aesdec_       rk13,rstate
+   aesdec_       rk12,rstate
    .endif
    .if (\rounds > 10)
-   aesdec_     rk11,rstate
-   aesdec_     rk10,rstate
+   aesdec_       rk11,rstate
+   aesdec_       rk10,rstate
    .endif
-   aesdec_     rk9,rstate
-   aesdec_     rk8,rstate
-   aesdec_     rk7,rstate
-   aesdec_     rk6,rstate
-   aesdec_     rk5,rstate
-   aesdec_     rk4,rstate
-   aesdec_     rk3,rstate
-   aesdec_     rk2,rstate
-   aesdec_     rk1,rstate
-   aesdeclast  rk0,rstate
-   epilog 
+   aesdec_       rk9,rstate
+   aesdec_       rk8,rstate
+   aesdec_       rk7,rstate
+   aesdec_       rk6,rstate
+   aesdec_       rk5,rstate
+   aesdec_       rk4,rstate
+   aesdec_       rk3,rstate
+   aesdec_       rk2,rstate
+   aesdec_       rk1,rstate
+   aesdeclast    rk0,rstate
+   epilog
 .endm
 
 
@@ -282,8 +294,6 @@
  **************************************************************************/
 
 .text
-   .globl  tresor_capable
-   .globl  tresor_set_key
    .globl  tresor_encblk_128
    .globl  tresor_decblk_128
    .globl  tresor_encblk_192
@@ -291,20 +301,28 @@
    .globl  tresor_encblk_256
    .globl  tresor_decblk_256
 
+   .globl  tresor_encblk_128_up
+   .globl  tresor_decblk_128_up
+
 
 /* void tresor_encblk(u8 *out, const u8 *in) */
 tresor_encblk_128:
-   encrypt_block   10
+   encrypt_block   10 0
 tresor_encblk_192:
-   encrypt_block   12
+   encrypt_block   12 0
 tresor_encblk_256:
-   encrypt_block   14
+   encrypt_block   14 0
+tresor_encblk_128_up:
+   encrypt_block   10 1
 
 
 /* void tresor_decblk(u8 *out, const u8 *in) */
 tresor_decblk_128:
-   decrypt_block   10
+   decrypt_block   10 0
 tresor_decblk_192:
-   decrypt_block   12
+   decrypt_block   12 0
 tresor_decblk_256:
-   decrypt_block   14
+   decrypt_block   14 0
+tresor_decblk_128_up:
+   decrypt_block   10 1
+

@@ -1,8 +1,9 @@
 /*
  * Cold boot resistant AES for 64-bit machines with AES-NI support
  * (currently all Core-i5/7 processors and some Core-i3)
- * 
- * Copyright (C) 2012   Benjamin Taubmann <taubmann.benjamin@informatik.stud.uni-erlangen.de>
+ *
+ * Copyright (C) 2012 Benjamin Taubmann <taubmann.benjamin@informatik.stud.uni-erlangen.de>
+ * Copyright (C) 2013 Johannes Goetzfried <johannes@jgoetzfried.de>
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -23,21 +24,19 @@
 #include "core.h"
 #include <core/linkage.h>
 
-
 /* number of iterations for key derivation */
 #define TRESOR_KDF_ITER 2000 
 #define AES_KEYSIZE_128 128
 #define AES_KEYSIZE_192 192
 #define AES_KEYSIZE_256 256
-#define AES_BLOCK_SIZE 16
-
-void crypto_tresor_init(void);
 
 /* 
  * Assembly functions implemented in tresor-intel_asm.S
  */
 asmlinkage void tresor_encblk_128(u8 *out, const u8 *in);
 asmlinkage void tresor_decblk_128(u8 *out, const u8 *in);
+asmlinkage void tresor_encblk_128_up(u8 *out, const u8 *in);
+asmlinkage void tresor_decblk_128_up(u8 *out, const u8 *in);
 asmlinkage void tresor_encblk_192(u8 *out, const u8 *in);
 asmlinkage void tresor_decblk_192(u8 *out, const u8 *in);
 asmlinkage void tresor_encblk_256(u8 *out, const u8 *in);
